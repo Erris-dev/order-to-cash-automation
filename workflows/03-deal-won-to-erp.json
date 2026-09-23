@@ -1,0 +1,1280 @@
+{
+  "id": "o2cWf03DealToErp",
+  "name": "WF-03 Deal Won to ERP",
+  "active": true,
+  "nodes": [
+    {
+      "id": "f0ea780f-f345-4bc1-a450-ae31dfa91d20",
+      "name": "Note: 1 · Receive Twenty event",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -60
+      ],
+      "parameters": {
+        "content": "## 1 · Receive Twenty event\nTwenty calls **POST /webhook/twenty-opportunity** on every opportunity update\n(registered by **WF-00**). n8n answers 200 immediately; Twenty's timeout is 5 s.\n\nTwenty signs each call: `X-Twenty-Webhook-Signature = HMAC_SHA256(secret, timestamp + \":\" + body)`.\nUnsigned, stale (> 5 min) or tampered events are dropped and logged.",
+        "width": 700,
+        "height": 640,
+        "color": 7
+      }
+    },
+    {
+      "name": "Twenty Opportunity Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "392d84c1-26c5-4186-a51a-97bad4f646a6",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "twenty-opportunity",
+        "responseMode": "onReceived",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "714bb6e8-a4bd-444c-ae49-0f2867738532"
+    },
+    {
+      "name": "Verify Twenty Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst MAX_AGE_MS = 5 * 60 * 1000;\n\nconst item = $input.first();\nconst headers = item.json.headers ?? {};\nconst secret = $env.TWENTY_WEBHOOK_SECRET;\nif (!secret) throw new Error('TWENTY_WEBHOOK_SECRET is not set');\n\nconst reject = (reason) => [{ json: { valid: false, reason } }];\n\nconst timestamp = String(headers['x-twenty-webhook-timestamp'] ?? '');\nconst signature = String(headers['x-twenty-webhook-signature'] ?? '');\nif (!timestamp || !signature) return reject('missing_signature_headers');\nif (!(Math.abs(Date.now() - Number(timestamp)) <= MAX_AGE_MS)) return reject('timestamp_outside_window');\nif (!item.binary?.data) return reject('empty_body');\n\n// Twenty signs \"<timestamp>:<JSON body>\" - the raw body is exactly that JSON.\nconst raw = await this.helpers.getBinaryDataBuffer(0, 'data');\nconst expected = crypto.createHmac('sha256', secret).update(timestamp + ':').update(raw).digest();\nconst given = Buffer.from(signature, 'hex');\nif (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) return reject('signature_mismatch');\n\nreturn [{ json: { valid: true, payload: JSON.parse(raw.toString('utf8')) } }];"
+      },
+      "id": "6c36ec5c-28b5-48c4-abb3-6cba2661cb3a"
+    },
+    {
+      "name": "Signature Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "6f13b8e2-313a-45df-af1d-7a4d4eca6156",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "0784c253-d65c-4122-ad5d-b4ec271fcff6"
+    },
+    {
+      "name": "Log Rejected Event",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        660,
+        500
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO event_log (workflow_name, event_type, entity_type, entity_id, message, data, execution_id)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)\nRETURNING id AS event_id;",
+        "options": {
+          "queryReplacement": "={{ [ 'WF-03 Deal Won to ERP', 'webhook.rejected', null, null, 'Twenty webhook rejected: ' + $json.reason, JSON.stringify({ reason: $json.reason }), $execution.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "ae59ebb3-2712-47ac-a6c9-9559b51ff7b4"
+    },
+    {
+      "id": "59d44a5c-f865-4377-af9e-3059eacfb356",
+      "name": "Note: 2 · Only new wins, only once",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        640,
+        -60
+      ],
+      "parameters": {
+        "content": "## 2 · Only new wins, only once\nContinues only when the event is `opportunity.updated`, **stage = CUSTOMER**\n(\"Closed Won\" in Muster's pipeline) and the stage is one of the changed fields.\n`sync_map` makes it idempotent: an opportunity that already has an Odoo order is skipped,\nso repeated or late events never create a second order.",
+        "width": 900,
+        "height": 640,
+        "color": 7
+      }
+    },
+    {
+      "name": "Is New Win?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        700,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b02fa388-b67f-45c9-abb6-17ce13188465",
+              "leftValue": "={{ $json.payload.eventName }}",
+              "rightValue": "opportunity.updated",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "2e144e1f-37bc-4196-a2a7-a50786bc36e4",
+              "leftValue": "={{ $json.payload.record.stage }}",
+              "rightValue": "CUSTOMER",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "669603a0-9f4a-4880-ab2b-a130fd785c5c",
+              "leftValue": "={{ ($json.payload.updatedFields ?? ['stage']).includes('stage') }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "5868d59c-7e2d-4053-ae01-51c62e0f0e26"
+    },
+    {
+      "name": "Not a Win – Ignore",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        920,
+        500
+      ],
+      "parameters": {},
+      "id": "3049d6a7-b938-422c-a730-cedea9fffa61"
+    },
+    {
+      "name": "Check Order Mapping",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        920,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  (SELECT odoo_id   FROM sync_map WHERE entity_type = 'order' AND crm_id = $1) AS odoo_order_id,\n  (SELECT odoo_name FROM sync_map WHERE entity_type = 'order' AND crm_id = $1) AS odoo_order_name;",
+        "options": {
+          "queryReplacement": "={{ [ $json.payload.record.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "72aa56a3-e606-4496-a4b1-95fb9dd507a8"
+    },
+    {
+      "name": "Already Synced?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1140,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "5a0cd868-9b09-414f-a5ed-94de3000f2d1",
+              "leftValue": "={{ $json.odoo_order_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "53b9c5dd-53ef-48ba-a666-ad8f15e40092"
+    },
+    {
+      "name": "Log Duplicate Win",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1360,
+        120
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO event_log (workflow_name, event_type, entity_type, entity_id, message, data, execution_id)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)\nRETURNING id AS event_id;",
+        "options": {
+          "queryReplacement": "={{ [ 'WF-03 Deal Won to ERP', 'order.duplicate_ignored', 'opportunity', $('Verify Twenty Signature').item.json.payload.record.id, 'Opportunity already has Odoo order ' + $json.odoo_order_name, JSON.stringify({}), $execution.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "53cc0b79-09fa-4d1e-ae1c-4dc29327b7ac"
+    },
+    {
+      "id": "46cb8848-5237-41a1-a699-46d0303891de",
+      "name": "Note: 3 · Find or create the Odoo customer",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1320,
+        220
+      ],
+      "parameters": {
+        "content": "## 3 · Find or create the Odoo customer\nLoads the opportunity with its company and point of contact (`depth=1`) and maps it\nto an Odoo `res.partner` (company → company partner; no company → the contact person).\nLookup order: **sync_map** → Odoo partner with `ref = twenty:<id>` → create.\nThe mapping is saved either way, so the next deal for this customer goes straight through.",
+        "width": 1780,
+        "height": 700,
+        "color": 4
+      }
+    },
+    {
+      "name": "Get Opportunity Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1360,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.TWENTY_URL }}/rest/opportunities/{{ $('Verify Twenty Signature').item.json.payload.record.id }}?depth=1",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": null,
+          "name": "Twenty – Muster"
+        }
+      },
+      "id": "5d6f0a7e-bcac-4b62-a3f5-6c88723dde05"
+    },
+    {
+      "name": "Map Twenty → Odoo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1580,
+        400
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const opp = $json.data.opportunity;\nconst company = opp.company ?? null;\nconst contact = opp.pointOfContact ?? null;\nif (!company && !contact) {\n  throw new Error('Opportunity ' + opp.id + ' has no company and no point of contact - cannot create an Odoo customer');\n}\n\nconst contactName = [contact?.name?.firstName, contact?.name?.lastName].filter(Boolean).join(' ');\nconst contactEmail = contact?.emails?.primaryEmail || false;\nconst contactPhone = contact?.phones?.primaryPhoneNumber\n  ? ((contact.phones.primaryPhoneCallingCode ?? '') + ' ' + contact.phones.primaryPhoneNumber).trim()\n  : false;\nconst address = company?.address ?? {};\nconst country = (address.addressCountry ?? '').trim();\n\nconst crm = company ? { object: 'companies', id: company.id } : { object: 'people', id: contact.id };\nconst partner = {\n  name: company ? company.name : contactName,\n  is_company: Boolean(company),\n  ref: 'twenty:' + crm.id,                       // stable link back to the CRM record\n  email: contactEmail,\n  phone: contactPhone,\n  website: company?.domainName?.primaryLinkUrl || false,\n  street: address.addressStreet1 || false,\n  zip: address.addressPostcode || false,\n  city: address.addressCity || false,\n};\n\nconst amount = opp.amount?.amountMicros != null ? opp.amount.amountMicros / 1e6 : 0;\nreturn {\n  json: {\n    opportunityId: opp.id,\n    opportunityName: opp.name,\n    amount,\n    currency: opp.amount?.currencyCode || 'EUR',\n    crm,\n    partner,\n    countryCode: /^[A-Za-z]{2}$/.test(country) ? country.toUpperCase() : 'DE', // Muster sells mainly in DE\n  },\n};"
+      },
+      "id": "78b8eb5f-e8ee-4db5-a190-1a5aa24cb1e3"
+    },
+    {
+      "name": "Check Customer Mapping",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1800,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT (SELECT odoo_id FROM sync_map WHERE entity_type = 'customer' AND crm_id = $1) AS odoo_partner_id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.crm.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "0c6ef301-b441-4b35-acc1-68de46dccf00"
+    },
+    {
+      "name": "Customer Mapped?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2020,
+        400
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b9592bc5-4b77-48d1-aced-796461950f41",
+              "leftValue": "={{ $json.odoo_partner_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "cfefb9d0-e52d-4710-abdd-f7c4ecd85753"
+    },
+    {
+      "name": "Use Mapped Customer",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2240,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "df26e276-ecc5-4fac-ae8c-7a73a9ad9adc",
+              "name": "partnerId",
+              "value": "={{ $json.odoo_partner_id }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "bba93d2c-39fb-4a73-afcf-3b7b200baa3e"
+    },
+    {
+      "name": "Search Customer in Odoo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2240,
+        520
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ODOO_URL }}/json/2/res.partner/search_read",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "odooApiKeyApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "={{ $env.ODOO_DB }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ domain: [['ref', '=', $('Map Twenty → Odoo').item.json.partner.ref]], fields: ['id', 'name'], limit: 1 }) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "odooApiKeyApi": {
+          "id": null,
+          "name": "Odoo – Muster"
+        }
+      },
+      "id": "8c9493e8-f4c7-4058-a5df-addf7f0202e3"
+    },
+    {
+      "name": "Found in Odoo?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2460,
+        520
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c08e25de-9d42-4aa9-a8f2-e8831f75b5df",
+              "leftValue": "={{ $json.body.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "00b09c79-06d2-4f95-ab5d-1bc38805cc03"
+    },
+    {
+      "name": "Use Found Customer",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2680,
+        440
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "62610de5-07f1-4163-aaf8-1ef64ccb006d",
+              "name": "partnerId",
+              "value": "={{ $json.body[0].id }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "078c1cc4-3d1a-4f4a-af0a-d8ca3439f200"
+    },
+    {
+      "name": "Find Country in Odoo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2680,
+        640
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ODOO_URL }}/json/2/res.country/search_read",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "odooApiKeyApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "={{ $env.ODOO_DB }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ domain: [['code', '=', $('Map Twenty → Odoo').item.json.countryCode]], fields: ['id'], limit: 1 }) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "odooApiKeyApi": {
+          "id": null,
+          "name": "Odoo – Muster"
+        }
+      },
+      "id": "e7f9a682-f958-4850-a069-75c2b950cfec"
+    },
+    {
+      "name": "Create Customer in Odoo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2900,
+        640
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ODOO_URL }}/json/2/res.partner/create",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "odooApiKeyApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "={{ $env.ODOO_DB }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ vals_list: [{ ...$('Map Twenty → Odoo').item.json.partner, country_id: $json.body[0]?.id ?? false }] }) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "odooApiKeyApi": {
+          "id": null,
+          "name": "Odoo – Muster"
+        }
+      },
+      "id": "5681e044-2965-4f57-a546-342c55bc918a"
+    },
+    {
+      "name": "Use Created Customer",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        3120,
+        640
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "488925cb-2bc5-4b47-a367-d3fc1b1d8cec",
+              "name": "partnerId",
+              "value": "={{ $json.body[0] }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "27f75d64-8b64-4527-a27d-ab4c7a30a373"
+    },
+    {
+      "name": "Save Customer Mapping",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3340,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO sync_map (entity_type, crm_object, crm_id, odoo_model, odoo_id, odoo_name)\nVALUES ('customer', $1, $2, 'res.partner', $3, $4)\nON CONFLICT (entity_type, crm_id) DO UPDATE SET odoo_id = EXCLUDED.odoo_id, last_synced_at = now()\nRETURNING odoo_id;",
+        "options": {
+          "queryReplacement": "={{ [ $('Map Twenty → Odoo').item.json.crm.object, $('Map Twenty → Odoo').item.json.crm.id, $json.partnerId, $('Map Twenty → Odoo').item.json.partner.name ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "8def99c0-ce84-497b-a441-27a12ca0b14d"
+    },
+    {
+      "id": "681bf531-6a09-4a35-a922-8ded698275b5",
+      "name": "Note: 4 · Create & confirm the sales order",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3300,
+        -60
+      ],
+      "parameters": {
+        "content": "## 4 · Create & confirm the sales order\nOne order line with product **CRM-DEAL** (\"Wholesale order (from CRM)\", 19 % VAT),\nprice = opportunity amount. The order is **confirmed** (won deal = confirmed order).\nThen the order number goes to `sync_map` and back into Twenty's **ERP Order Ref** field.",
+        "width": 1820,
+        "height": 640,
+        "color": 6
+      }
+    },
+    {
+      "name": "Find Deal Product",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3560,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ODOO_URL }}/json/2/product.product/search_read",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "odooApiKeyApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "={{ $env.ODOO_DB }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ domain: [['default_code', '=', 'CRM-DEAL']], fields: ['id'], limit: 1 }) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "odooApiKeyApi": {
+          "id": null,
+          "name": "Odoo – Muster"
+        }
+      },
+      "id": "0e9ad02d-b24b-4890-aa0d-633493816301"
+    },
+    {
+      "name": "Build Sales Order",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3780,
+        400
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const product = $json.body[0];\nif (!product) throw new Error('Odoo product CRM-DEAL not found - run \"docker compose up -d odoo-init\" to create it');\n\nconst m = $('Map Twenty → Odoo').item.json;\nconst warnings = [];\nif (m.currency !== 'EUR') warnings.push('opportunity currency is ' + m.currency + ', order created in EUR');\nif (!m.amount) warnings.push('opportunity has no amount - order line price is 0');\n\nreturn {\n  json: {\n    warnings,\n    vals: {\n      partner_id: Number($('Save Customer Mapping').item.json.odoo_id),\n      client_order_ref: m.opportunityName,\n      origin: 'Twenty opportunity ' + m.opportunityId,\n      order_line: [[0, 0, { product_id: product.id, name: m.opportunityName, product_uom_qty: 1, price_unit: m.amount }]],\n    },\n  },\n};"
+      },
+      "id": "b64cb568-652c-4663-a054-c2c1a2d6175d"
+    },
+    {
+      "name": "Create Sales Order",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4000,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ODOO_URL }}/json/2/sale.order/create",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "odooApiKeyApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "={{ $env.ODOO_DB }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ vals_list: [$json.vals] }) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "odooApiKeyApi": {
+          "id": null,
+          "name": "Odoo – Muster"
+        }
+      },
+      "id": "ac3e60e5-8d66-42fc-a35f-7d0ff43d0026"
+    },
+    {
+      "name": "Confirm Sales Order",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4220,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ODOO_URL }}/json/2/sale.order/action_confirm",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "odooApiKeyApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "={{ $env.ODOO_DB }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ ids: [$json.body[0]] }) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "odooApiKeyApi": {
+          "id": null,
+          "name": "Odoo – Muster"
+        }
+      },
+      "id": "f64fe30d-c2f0-41c7-a484-1948a30d5f61"
+    },
+    {
+      "name": "Read Order Reference",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4440,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ODOO_URL }}/json/2/sale.order/read",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "odooApiKeyApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "={{ $env.ODOO_DB }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ ids: [$('Create Sales Order').item.json.body[0]], fields: ['name', 'amount_total', 'state'] }) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "odooApiKeyApi": {
+          "id": null,
+          "name": "Odoo – Muster"
+        }
+      },
+      "id": "fc3396d6-3627-4b79-aed9-f1c3e3b01dae"
+    },
+    {
+      "name": "Save Order Mapping",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        4660,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO sync_map (entity_type, crm_object, crm_id, odoo_model, odoo_id, odoo_name)\nVALUES ('order', 'opportunities', $1, 'sale.order', $2, $3)\nRETURNING odoo_id, odoo_name;",
+        "options": {
+          "queryReplacement": "={{ [ $('Map Twenty → Odoo').item.json.opportunityId, $json.body[0].id, $json.body[0].name ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "fb03f6f3-e8cd-4f1a-a278-60766b2b525e"
+    },
+    {
+      "name": "Write Order Ref to Twenty",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4880,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.TWENTY_URL }}/rest/opportunities/{{ $('Map Twenty → Odoo').item.json.opportunityId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ erpOrderRef: $('Save Order Mapping').item.json.odoo_name }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": null,
+          "name": "Twenty – Muster"
+        }
+      },
+      "id": "bf2d0da1-8419-4505-aa0a-471e958deed6"
+    },
+    {
+      "name": "Log Order Created",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        5100,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO event_log (workflow_name, event_type, entity_type, entity_id, message, data, execution_id)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)\nRETURNING id AS event_id;",
+        "options": {
+          "queryReplacement": "={{ [ 'WF-03 Deal Won to ERP', 'order.created', 'opportunity', $('Map Twenty → Odoo').item.json.opportunityId, 'Odoo order ' + $('Read Order Reference').item.json.body[0].name + ' created for ' + $('Map Twenty → Odoo').item.json.partner.name, JSON.stringify({ odoo_order_id: $('Read Order Reference').item.json.body[0].id, amount_total: $('Read Order Reference').item.json.body[0].amount_total, state: $('Read Order Reference').item.json.body[0].state, odoo_partner_id: $('Save Customer Mapping').item.json.odoo_id, warnings: $('Build Sales Order').item.json.warnings }), $execution.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "4f043742-671c-4066-aef2-583fa74774de"
+    }
+  ],
+  "connections": {
+    "Twenty Opportunity Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify Twenty Signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Twenty Signature": {
+      "main": [
+        [
+          {
+            "node": "Signature Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signature Valid?": {
+      "main": [
+        [
+          {
+            "node": "Is New Win?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Rejected Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is New Win?": {
+      "main": [
+        [
+          {
+            "node": "Check Order Mapping",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Not a Win – Ignore",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Order Mapping": {
+      "main": [
+        [
+          {
+            "node": "Already Synced?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Already Synced?": {
+      "main": [
+        [
+          {
+            "node": "Log Duplicate Win",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get Opportunity Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Opportunity Details": {
+      "main": [
+        [
+          {
+            "node": "Map Twenty → Odoo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map Twenty → Odoo": {
+      "main": [
+        [
+          {
+            "node": "Check Customer Mapping",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Customer Mapping": {
+      "main": [
+        [
+          {
+            "node": "Customer Mapped?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Customer Mapped?": {
+      "main": [
+        [
+          {
+            "node": "Use Mapped Customer",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Search Customer in Odoo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Customer in Odoo": {
+      "main": [
+        [
+          {
+            "node": "Found in Odoo?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Found in Odoo?": {
+      "main": [
+        [
+          {
+            "node": "Use Found Customer",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Find Country in Odoo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Country in Odoo": {
+      "main": [
+        [
+          {
+            "node": "Create Customer in Odoo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Customer in Odoo": {
+      "main": [
+        [
+          {
+            "node": "Use Created Customer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Use Mapped Customer": {
+      "main": [
+        [
+          {
+            "node": "Save Customer Mapping",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Use Found Customer": {
+      "main": [
+        [
+          {
+            "node": "Save Customer Mapping",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Use Created Customer": {
+      "main": [
+        [
+          {
+            "node": "Save Customer Mapping",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Customer Mapping": {
+      "main": [
+        [
+          {
+            "node": "Find Deal Product",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Deal Product": {
+      "main": [
+        [
+          {
+            "node": "Build Sales Order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Sales Order": {
+      "main": [
+        [
+          {
+            "node": "Create Sales Order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Sales Order": {
+      "main": [
+        [
+          {
+            "node": "Confirm Sales Order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Confirm Sales Order": {
+      "main": [
+        [
+          {
+            "node": "Read Order Reference",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Order Reference": {
+      "main": [
+        [
+          {
+            "node": "Save Order Mapping",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Order Mapping": {
+      "main": [
+        [
+          {
+            "node": "Write Order Ref to Twenty",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Order Ref to Twenty": {
+      "main": [
+        [
+          {
+            "node": "Log Order Created",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Berlin",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "o2cWf07ErrorsHdl"
+  },
+  "pinData": {},
+  "tags": []
+}

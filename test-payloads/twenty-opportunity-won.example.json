@@ -1,0 +1,29 @@
+{
+  "targetUrl": "http://n8n-main:5678/webhook/twenty-opportunity",
+  "eventName": "opportunity.updated",
+  "objectMetadata": {
+    "id": "3c612e57-02ee-4a0c-b72a-aebdcda4815c",
+    "nameSingular": "opportunity"
+  },
+  "workspaceId": "00000000-0000-4000-8000-000000000001",
+  "webhookId": "00000000-0000-4000-8000-000000000002",
+  "eventDate": "2026-09-30T10:32:57.178Z",
+  "record": {
+    "id": "bf6d665d-43e1-4be9-b8d3-9f94b05e907c",
+    "name": "Hotel Alpenblick GmbH – website inquiry",
+    "stage": "CUSTOMER",
+    "amount": {
+      "amountMicros": 48000000000,
+      "currencyCode": "EUR"
+    },
+    "closeDate": null,
+    "companyId": "226fcbf8-8912-4782-a82b-a1aec68323fe",
+    "pointOfContactId": "639bf8cf-69b7-47d2-9f89-f42c4bd1b698",
+    "createdAt": "2026-09-30T10:30:33.513Z",
+    "updatedAt": "2026-09-30T10:32:57.148Z",
+    "…": "(all other opportunity fields)"
+  },
+  "updatedFields": [
+    "stage"
+  ]
+}
