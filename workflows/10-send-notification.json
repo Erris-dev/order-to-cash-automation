@@ -1,0 +1,122 @@
+{
+  "id": "o2cWf10SendNotif",
+  "name": "WF-10 Send Notification",
+  "active": true,
+  "nodes": [
+    {
+      "id": "b4283114-ce54-45de-ae98-f96209acc575",
+      "name": "Note: WF-10 · Shared email sender",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -300
+      ],
+      "parameters": {
+        "content": "## WF-10 · Shared email sender\nEvery notification (error alerts, hot leads, review requests, daily report) goes through here,\nso the mail credential lives in **one** node. Switching to Outlook or Slack means changing one node.\n\n**Input** (one item per mail): `{ to?, subject, html }`. `to` defaults to `ALERT_EMAIL_TO`.\nCallers use *On error: continue*, so a missing or broken Gmail credential never\nstops the business process. The failure shows up in the caller's execution log instead.\n\nNo error workflow is set, on purpose: WF-07 calls this workflow, and a mail\nfailure must not trigger WF-07 again.",
+        "width": 760,
+        "height": 380,
+        "color": 5
+      }
+    },
+    {
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "542fe0e5-32cc-491c-ab22-b4cf3f9a1b91"
+    },
+    {
+      "name": "Send Email (Gmail)",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        240,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "parameters": {
+        "sendTo": "={{ $json.to || $env.ALERT_EMAIL_TO }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "html",
+        "message": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": null,
+          "name": "Gmail – Muster"
+        }
+      },
+      "id": "e8134e66-1944-46a3-a6cb-b280698dcf0c"
+    },
+    {
+      "name": "Log Notification Sent",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        480,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO event_log (workflow_name, event_type, entity_type, entity_id, message, data, execution_id)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)\nRETURNING id AS event_id;",
+        "options": {
+          "queryReplacement": "={{ [ 'WF-10 Send Notification', 'notification.sent', null, null, 'Mail sent: ' + $('When Called').item.json.subject, JSON.stringify({ to: $('When Called').item.json.to || $env.ALERT_EMAIL_TO, gmail_id: $json.id }), $execution.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "9556fcde-ccbd-4eae-ae85-36192c25fbf0"
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Send Email (Gmail)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Email (Gmail)": {
+      "main": [
+        [
+          {
+            "node": "Log Notification Sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Berlin",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {},
+  "tags": []
+}

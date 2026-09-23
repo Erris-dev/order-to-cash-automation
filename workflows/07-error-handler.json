@@ -1,0 +1,178 @@
+{
+  "id": "o2cWf07ErrorsHdl",
+  "name": "WF-07 Error Handler",
+  "active": true,
+  "nodes": [
+    {
+      "id": "0fa15ee9-f24f-4504-a997-54dcdcd0d399",
+      "name": "Note: WF-07 · Central error handler",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        -260
+      ],
+      "parameters": {
+        "content": "## WF-07 · Central error handler\nEvery other workflow sets **Settings → Error workflow = WF-07**.\nWhen one of them fails, n8n starts this workflow with the failed execution's details.\n\n1. **Build Error Summary**: turns n8n's error payload into one flat record + an alert text.\n2. **Log to workflow_errors**: always runs first, so every failure is on record even if email is down.\n3. **Send Alert (WF-10)**: email to `ALERT_EMAIL_TO` with a link to the failed execution.\n   The Gmail node lives in the shared sub-workflow WF-10, and this call is set to *On error: continue*.\n   That way a missing or broken mail credential can never stop the logging step.\n\nThis workflow deliberately has **no** error workflow of its own (it would loop).",
+        "width": 1120,
+        "height": 340,
+        "color": 5
+      }
+    },
+    {
+      "name": "On Workflow Error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {},
+      "id": "5fe182cc-4c04-4421-a631-5cebc1e95a04"
+    },
+    {
+      "name": "Build Error Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        200
+      ],
+      "parameters": {
+        "jsCode": "// n8n sends { execution, workflow } for failed executions and\n// { trigger, workflow } when a trigger node itself failed (e.g. auth error on poll).\nconst { execution, trigger, workflow = {} } = $json;\nconst err = execution?.error ?? trigger?.error ?? {};\n\nconst summary = {\n  workflow_id: workflow.id ?? null,\n  workflow_name: workflow.name ?? 'unknown workflow',\n  node_name: execution?.lastNodeExecuted ?? err.node?.name ?? null,\n  error_message: String(err.message ?? 'Unknown error').slice(0, 2000),\n  error_details: {\n    name: err.name ?? null,\n    description: err.description ?? null,\n    httpCode: err.httpCode ?? err.context?.httpCode ?? null,\n    stack: (err.stack ?? '').split('\\n').slice(0, 8).join('\\n'),\n  },\n  execution_id: execution?.id ?? null,\n  execution_url: execution?.url ?? null,\n  execution_mode: execution?.mode ?? trigger?.mode ?? null,\n  retry_of: execution?.retryOf ?? null,\n};\n\nconst esc = (s) => String(s ?? '').replace(/[&<>\"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;' }[c]));\nsummary.alert_subject = '[n8n error] ' + summary.workflow_name + ' – ' + (summary.node_name ?? 'trigger');\nsummary.alert_html = [\n  '<h3>Workflow failed / Workflow fehlgeschlagen</h3>',\n  '<table cellpadding=\"4\">',\n  '<tr><td><b>Workflow</b></td><td>' + esc(summary.workflow_name) + '</td></tr>',\n  '<tr><td><b>Node</b></td><td>' + esc(summary.node_name ?? '–') + '</td></tr>',\n  '<tr><td><b>Error</b></td><td>' + esc(summary.error_message) + '</td></tr>',\n  '<tr><td><b>Mode</b></td><td>' + esc(summary.execution_mode ?? '–') + '</td></tr>',\n  '</table>',\n  summary.execution_url ? '<p><a href=\"' + esc(summary.execution_url) + '\">Open execution ' + esc(summary.execution_id) + '</a></p>' : '',\n].join('\\n');\n\nreturn [{ json: summary }];"
+      },
+      "id": "0cb52a17-a81c-4098-a56e-33f49f9fdbec"
+    },
+    {
+      "name": "Log to workflow_errors",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        440,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO workflow_errors\n  (workflow_id, workflow_name, node_name, error_message, error_details, execution_id, execution_url, execution_mode, retry_of)\nVALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9)\nRETURNING id AS error_id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.workflow_id, $json.workflow_name, $json.node_name, $json.error_message, JSON.stringify($json.error_details), $json.execution_id, $json.execution_url, $json.execution_mode, $json.retry_of ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "bc10fa4a-a2a2-47cf-ae1b-440b75a0362d"
+    },
+    {
+      "name": "Prepare Alert Mail",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        660,
+        200
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "6384183d-1676-4d3e-a6b3-13b37a1f1529",
+              "name": "subject",
+              "value": "={{ $('Build Error Summary').item.json.alert_subject }}",
+              "type": "string"
+            },
+            {
+              "id": "b74a84dd-cb10-4460-aa00-c84282e4c9ca",
+              "name": "html",
+              "value": "={{ $('Build Error Summary').item.json.alert_html }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "3de63538-be23-4484-aacd-97afbf086dbf"
+    },
+    {
+      "name": "Send Alert (WF-10)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        880,
+        200
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "o2cWf10SendNotif",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "bff53b7a-e4da-41c1-a1bc-d1046765bd6d"
+    }
+  ],
+  "connections": {
+    "On Workflow Error": {
+      "main": [
+        [
+          {
+            "node": "Build Error Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Error Summary": {
+      "main": [
+        [
+          {
+            "node": "Log to workflow_errors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log to workflow_errors": {
+      "main": [
+        [
+          {
+            "node": "Prepare Alert Mail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Alert Mail": {
+      "main": [
+        [
+          {
+            "node": "Send Alert (WF-10)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Berlin",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {},
+  "tags": []
+}
