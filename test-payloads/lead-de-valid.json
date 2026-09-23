@@ -1,0 +1,13 @@
+{
+  "firstName": "Julia",
+  "lastName": "Berger",
+  "email": "Julia.Berger@hotel-alpenblick.example",
+  "phone": "+49 8821 55 40 0",
+  "company": "Hotel Alpenblick GmbH",
+  "website": "https://www.hotel-alpenblick.example",
+  "country": "DE",
+  "message": "Guten Tag, wir eröffnen im Frühjahr ein zweites Haus mit 80 Zimmern und suchen einen Großhändler für Frühstücksbuffet, Reinigungsmittel und Zimmerausstattung. Bitte senden Sie uns ein Angebot.",
+  "estimatedBudget": 48000,
+  "consent": true,
+  "source": "website-contact-form"
+}

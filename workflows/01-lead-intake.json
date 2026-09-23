@@ -1,0 +1,1240 @@
+{
+  "id": "o2cWf01LeadIntak",
+  "name": "WF-01 Lead Intake",
+  "active": true,
+  "nodes": [
+    {
+      "id": "ebe0dfa0-c4fd-433d-a483-430871e60cb6",
+      "name": "Note: 1 · Receive & authenticate",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -40
+      ],
+      "parameters": {
+        "content": "## 1 · Receive & authenticate\n**POST /webhook/lead-intake** from the website contact form.\n\nThe site signs every request:\n`X-Muster-Timestamp: <unix seconds>`\n`X-Muster-Signature: sha256=HMAC_SHA256(secret, timestamp + \".\" + raw body)`\n\nThe signature is checked on the **raw bytes** (Webhook option *Raw Body*), in constant time,\nand requests older than 5 minutes are refused (replay protection).\nBad signature → **401**, logged to `event_log`.",
+        "width": 700,
+        "height": 760,
+        "color": 7
+      }
+    },
+    {
+      "name": "Lead Form Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "401c229c-d812-41b5-adef-11f5bc77f831",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-intake",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "9bf5bfc6-4944-4942-a4c3-84bf26ac9568"
+    },
+    {
+      "name": "Verify HMAC Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst MAX_AGE_SECONDS = 300;\n\nconst item = $input.first();\nconst headers = item.json.headers ?? {};\nconst secret = $env.LEAD_WEBHOOK_HMAC_SECRET;\nif (!secret) throw new Error('LEAD_WEBHOOK_HMAC_SECRET is not set'); // config problem -> WF-07\n\nconst reject = (reason) => [{ json: { valid: false, reason } }];\n\nconst timestamp = String(headers['x-muster-timestamp'] ?? '');\nconst signature = String(headers['x-muster-signature'] ?? '');\nif (!timestamp || !signature.startsWith('sha256=')) return reject('missing_signature_headers');\n\nconst age = Math.abs(Date.now() / 1000 - Number(timestamp));\nif (!Number.isFinite(age) || age > MAX_AGE_SECONDS) return reject('timestamp_outside_window');\nif (!item.binary?.data) return reject('empty_body');\n\nconst raw = await this.helpers.getBinaryDataBuffer(0, 'data');\nconst expected = crypto.createHmac('sha256', secret).update(timestamp + '.').update(raw).digest();\nconst given = Buffer.from(signature.slice('sha256='.length), 'hex');\nif (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) return reject('signature_mismatch');\n\nlet body;\ntry { body = JSON.parse(raw.toString('utf8')); } catch { return reject('invalid_json'); }\nreturn [{ json: { valid: true, body } }];"
+      },
+      "id": "c647d3b7-cd1a-4792-ac0e-8c811b40a96b"
+    },
+    {
+      "name": "Signature Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "6f13b8e2-313a-45df-af1d-7a4d4eca6156",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "185fd778-e0f7-42f9-a201-8f8f9c72ad79"
+    },
+    {
+      "name": "Reject 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        660,
+        540
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: \"invalid_signature\" }) }}",
+        "options": {
+          "responseCode": 401
+        }
+      },
+      "id": "f8431ec7-d39a-45dc-a6d4-048337f5c582"
+    },
+    {
+      "name": "Log Rejected Request",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        880,
+        540
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO event_log (workflow_name, event_type, entity_type, entity_id, message, data, execution_id)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)\nRETURNING id AS event_id;",
+        "options": {
+          "queryReplacement": "={{ [ 'WF-01 Lead Intake', 'lead.rejected', null, null, 'Signature check failed: ' + $('Verify HMAC Signature').item.json.reason, JSON.stringify({ reason: $('Verify HMAC Signature').item.json.reason }), $execution.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "9ddac039-0ee9-4192-a373-881d33e25cc3"
+    },
+    {
+      "id": "ac669734-d2e5-4678-a950-a07eee3b6927",
+      "name": "Note: 2 · Validate & normalise",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        640,
+        -40
+      ],
+      "parameters": {
+        "content": "## 2 · Validate & normalise\nRequired: valid **email**, a **name**, **consent = true** (GDPR).\nNormalises whitespace, email case, phone format, country code, and picks the\nreply language (**de** for DE/AT/CH/LI/LU unless the form says otherwise).\nThe company domain comes from `website`, or from the email domain unless it is a\nfree-mail provider (gmail.com, web.de, …).\nInvalid → **422** with the list of problems.",
+        "width": 700,
+        "height": 520,
+        "color": 7
+      }
+    },
+    {
+      "name": "Validate & Normalize Lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const FREE_MAIL = new Set(['gmail.com', 'googlemail.com', 'yahoo.com', 'yahoo.de', 'outlook.com', 'outlook.de',\n  'hotmail.com', 'hotmail.de', 'live.com', 'icloud.com', 'me.com', 'gmx.de', 'gmx.net', 'gmx.at', 'gmx.ch',\n  'web.de', 't-online.de', 'freenet.de', 'aol.com', 'proton.me', 'protonmail.com', 'mail.de', 'posteo.de']);\nconst GERMAN_SPEAKING = new Set(['DE', 'AT', 'CH', 'LI', 'LU']);\n\nconst b = $json.body ?? {};\nconst errors = [];\nconst text = (v, max = 200) => (typeof v === 'string' ? v.trim().replace(/\\s+/g, ' ').slice(0, max) : '');\n\nconst email = text(b.email, 254).toLowerCase();\nif (!/^[^\\s@]+@[^\\s@]+\\.[a-z]{2,}$/i.test(email)) errors.push('email: missing or invalid');\n\nlet firstName = text(b.firstName, 100);\nlet lastName = text(b.lastName, 100);\nif (!firstName && !lastName && text(b.name)) {\n  const parts = text(b.name).split(' ');\n  lastName = parts.pop();\n  firstName = parts.join(' ');\n}\nif (!firstName && !lastName) errors.push('name: firstName/lastName missing');\nif (b.consent !== true) errors.push('consent: must be true');\n\nconst country = text(b.country, 10).toUpperCase();\nif (country && !/^[A-Z]{2}$/.test(country)) errors.push('country: must be a 2-letter ISO code (e.g. DE)');\n\nconst budgetIn = b.estimatedBudget;\nconst budget = budgetIn === undefined || budgetIn === null || budgetIn === '' ? null : Number(budgetIn);\nif (budget !== null && (!Number.isFinite(budget) || budget < 0)) errors.push('estimatedBudget: must be a number >= 0');\n\nconst requested = text(b.language, 2).toLowerCase();\nconst language = ['de', 'en'].includes(requested) ? requested : GERMAN_SPEAKING.has(country) ? 'de' : 'en';\n\nconst emailDomain = email.split('@')[1] ?? '';\nconst website = text(b.website).toLowerCase().replace(/^https?:\\/\\//, '').replace(/^www\\./, '').replace(/[/?#].*$/, '');\nconst companyDomain = website || (FREE_MAIL.has(emailDomain) ? '' : emailDomain);\nconst company = text(b.company);\n\n// Twenty filter used to find an existing company: by domain if we have one, else by exact name.\nconst q = (s) => s.replace(/\"/g, '');\nconst companyFilter = companyDomain\n  ? 'or(domainName.primaryLinkUrl[ilike]:\"%://' + q(companyDomain) + '\",domainName.primaryLinkUrl[ilike]:\"%://www.' + q(companyDomain) + '\",domainName.primaryLinkUrl[eq]:\"' + q(companyDomain) + '\")'\n  : company ? 'name[eq]:\"' + q(company) + '\"' : '';\n\nreturn {\n  json: {\n    valid: errors.length === 0,\n    errors,\n    lead: {\n      email, firstName, lastName, company, companyDomain, companyFilter,\n      phone: text(b.phone, 40).replace(/[^\\d+]/g, ''),\n      country: country || null,\n      language,\n      message: typeof b.message === 'string' ? b.message.trim().slice(0, 5000) : '',\n      estimatedBudget: budget,\n      source: text(b.source, 50) || 'website',\n    },\n    rawPayload: b,\n  },\n};"
+      },
+      "id": "7bb51f7d-2c2a-4406-ab1a-f7aeb6241d28"
+    },
+    {
+      "name": "Lead Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        920,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b09d5083-4d51-4f0c-a0a0-9e9c265637f4",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "267b6cc3-9820-407f-a71d-9e0ef33d582c"
+    },
+    {
+      "name": "Reject 422",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1140,
+        540
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: \"validation_failed\", details: $json.errors }) }}",
+        "options": {
+          "responseCode": 422
+        }
+      },
+      "id": "88b0c19d-79a0-4b2b-a070-b1807d7b6b70"
+    },
+    {
+      "name": "Log Invalid Lead",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1360,
+        540
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO event_log (workflow_name, event_type, entity_type, entity_id, message, data, execution_id)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)\nRETURNING id AS event_id;",
+        "options": {
+          "queryReplacement": "={{ [ 'WF-01 Lead Intake', 'lead.invalid', null, null, 'Validation failed: ' + $('Validate & Normalize Lead').item.json.errors.join('; '), JSON.stringify({ errors: $('Validate & Normalize Lead').item.json.errors }), $execution.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "e2ec0bc5-66ec-49b7-a5a9-24f00e8aa027"
+    },
+    {
+      "id": "94e148f8-6863-4983-a4e5-8e2bbf976e37",
+      "name": "Note: 3 · Deduplicate & store",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        -40
+      ],
+      "parameters": {
+        "content": "## 3 · Deduplicate & store\n**Dedupe key** = SHA-256 of the normalised email: one row per person.\nA repeat submission updates the row and increments `submission_count`\ninstead of creating a second lead.\nThen the caller gets **202 Accepted** right away. The CRM sync below runs\nafter the response, so the website never waits for Twenty.",
+        "width": 700,
+        "height": 520,
+        "color": 7
+      }
+    },
+    {
+      "name": "Build Dedupe Key",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1160,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const crypto = require('crypto');\nconst dedupeKey = crypto.createHash('sha256').update($json.lead.email).digest('hex');\nreturn { json: { ...$json, dedupeKey } };"
+      },
+      "id": "5403fcbf-9088-4709-a10c-d3e7269c89c9"
+    },
+    {
+      "name": "Upsert Lead Row",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1380,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO leads (dedupe_key, email, first_name, last_name, company, phone, country, language, message, source, raw_payload)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)\nON CONFLICT (dedupe_key) DO UPDATE SET\n  first_name       = COALESCE(EXCLUDED.first_name, leads.first_name),\n  last_name        = COALESCE(EXCLUDED.last_name,  leads.last_name),\n  company          = COALESCE(EXCLUDED.company,    leads.company),\n  phone            = COALESCE(EXCLUDED.phone,      leads.phone),\n  country          = COALESCE(EXCLUDED.country,    leads.country),\n  language         = EXCLUDED.language,\n  message          = EXCLUDED.message,\n  raw_payload      = EXCLUDED.raw_payload,\n  submission_count = leads.submission_count + 1\nRETURNING id, submission_count, (xmax = 0) AS is_new, crm_person_id, crm_company_id, crm_opportunity_id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.dedupeKey, $json.lead.email, $json.lead.firstName || null, $json.lead.lastName || null, $json.lead.company || null, $json.lead.phone || null, $json.lead.country, $json.lead.language, $json.lead.message || null, $json.lead.source, JSON.stringify($json.rawPayload) ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "703c8972-f050-4535-ae3f-42299fa55e9c"
+    },
+    {
+      "name": "Accept 202",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1600,
+        300
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: \"accepted\", leadId: Number($json.id), duplicate: !$json.is_new }) }}",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "id": "3c365136-1204-4086-a626-126af7eeb57a"
+    },
+    {
+      "id": "f60c3cc3-2c45-42d8-aa30-70b514207572",
+      "name": "Note: 4 · Sync to Twenty CRM",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1780,
+        -120
+      ],
+      "parameters": {
+        "content": "## 4 · Sync to Twenty CRM\n**Company**: look up by domain (or exact name when there is no business domain);\ncreate it only if nothing matches. No company info → the person is created without one.\n**Person**: `upsert=true` on the email, so a returning lead updates the same record.\n**Opportunity**: created once per lead (stage **NEW**, amount = estimated budget in EUR).\nReturning leads keep their existing opportunity.\nAll HTTP nodes retry 3× on failure; after that the error goes to WF-07.",
+        "width": 1580,
+        "height": 820,
+        "color": 4
+      }
+    },
+    {
+      "name": "Has Company Info?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1820,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "872017b3-06d4-494d-ac09-b161b4cc2f29",
+              "leftValue": "={{ $('Build Dedupe Key').item.json.lead.companyFilter }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "63918e5b-e1e7-4a9a-a2ce-0aa604d1e2ac"
+    },
+    {
+      "name": "Find Company",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2040,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.TWENTY_URL }}/rest/companies?limit=1&filter={{ encodeURIComponent($('Build Dedupe Key').item.json.lead.companyFilter) }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": null,
+          "name": "Twenty – Muster"
+        }
+      },
+      "id": "9714efc9-4fdb-4f10-a564-25388dbe8718"
+    },
+    {
+      "name": "Company Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2260,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "da3711ec-a73e-4ee4-a9fa-3b2715882370",
+              "leftValue": "={{ $json.data.companies.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "d709e080-2187-4435-aaf1-1efeabb4488d"
+    },
+    {
+      "name": "Use Found Company",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2480,
+        80
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "d4ee259e-36ec-495e-a22c-db9f70c5e746",
+              "name": "companyId",
+              "value": "={{ $json.data.companies[0].id }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0608b103-827b-4291-a958-c1bb11081d1a"
+    },
+    {
+      "name": "Create Company",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2480,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TWENTY_URL }}/rest/companies",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  name: $('Build Dedupe Key').item.json.lead.company || $('Build Dedupe Key').item.json.lead.companyDomain,\n  ...($('Build Dedupe Key').item.json.lead.companyDomain ? { domainName: { primaryLinkUrl: 'https://' + $('Build Dedupe Key').item.json.lead.companyDomain } } : {}),\n  ...($('Build Dedupe Key').item.json.lead.country ? { address: { addressCountry: $('Build Dedupe Key').item.json.lead.country } } : {}),\n}) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": null,
+          "name": "Twenty – Muster"
+        }
+      },
+      "id": "58758b11-9008-4568-a761-0e437f4f72ac"
+    },
+    {
+      "name": "Use Created Company",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2700,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "efb19bdd-75b3-466c-aa7a-1e1890b88c04",
+              "name": "companyId",
+              "value": "={{ $json.data.createCompany.id }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "46bbab9c-1bce-47ed-a75e-a2e82f4a7930"
+    },
+    {
+      "name": "No Company",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2040,
+        480
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "3d926396-9aab-498f-a82a-0faf6be5f9a6",
+              "name": "companyId",
+              "value": "",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "94b6d7d4-fda7-4e8b-ad30-f0b3c0daec98"
+    },
+    {
+      "name": "Upsert Person",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2920,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TWENTY_URL }}/rest/people?upsert=true",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  name: { firstName: $('Build Dedupe Key').item.json.lead.firstName, lastName: $('Build Dedupe Key').item.json.lead.lastName },\n  emails: { primaryEmail: $('Build Dedupe Key').item.json.lead.email },\n  ...($('Build Dedupe Key').item.json.lead.phone ? { phones: { primaryPhoneNumber: $('Build Dedupe Key').item.json.lead.phone } } : {}),\n  ...($json.companyId ? { companyId: $json.companyId } : {}),\n}) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": null,
+          "name": "Twenty – Muster"
+        }
+      },
+      "id": "637d9f83-f3c0-4a5f-a478-c5feac96a646"
+    },
+    {
+      "name": "Needs Opportunity?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3140,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c3739050-ecfe-4eef-ac43-62cb723acbcd",
+              "leftValue": "={{ $('Upsert Lead Row').item.json.crm_opportunity_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "0fe3bf8d-c50e-4192-abc3-5c8cb9f9824b"
+    },
+    {
+      "name": "Create Opportunity",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3360,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TWENTY_URL }}/rest/opportunities",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  name: ($('Build Dedupe Key').item.json.lead.company || ($('Build Dedupe Key').item.json.lead.firstName + ' ' + $('Build Dedupe Key').item.json.lead.lastName)) + ' – website inquiry',\n  stage: 'NEW',\n  pointOfContactId: $json.data.createPerson.id,\n  ...($('Upsert Person').item.json.data.createPerson.companyId ? { companyId: $('Upsert Person').item.json.data.createPerson.companyId } : {}),\n  ...($('Build Dedupe Key').item.json.lead.estimatedBudget !== null ? { amount: { amountMicros: Math.round($('Build Dedupe Key').item.json.lead.estimatedBudget * 1e6), currencyCode: 'EUR' } } : {}),\n}) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": null,
+          "name": "Twenty – Muster"
+        }
+      },
+      "id": "3a7b39de-99c9-410e-ade2-30f93cf294c4"
+    },
+    {
+      "name": "Use New Opportunity",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        3580,
+        200
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "1dd92fb5-5366-46eb-acbb-590cf0636bf1",
+              "name": "opportunityId",
+              "value": "={{ $json.data.createOpportunity.id }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b28d0ab3-4dd9-49a4-a754-a54aef13c999"
+    },
+    {
+      "name": "Keep Existing Opportunity",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        3360,
+        420
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "eb75c958-6162-40f1-a097-87b775d0780b",
+              "name": "opportunityId",
+              "value": "={{ $('Upsert Lead Row').item.json.crm_opportunity_id }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "56ea871a-a5da-46f1-a798-58bfabf9b1df"
+    },
+    {
+      "id": "f7fb289b-edf7-4ac6-a376-955a96f0bb73",
+      "name": "Note: 5 · Save IDs, attach message, log, score",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3760,
+        -40
+      ],
+      "parameters": {
+        "content": "## 5 · Save IDs, attach message, log, score\nStores the Twenty IDs on the `leads` row (status **synced**), attaches the form\nmessage as a **note** on the person and opportunity, writes an audit event and\nhands the lead to **WF-02 AI Lead Qualification** (fire-and-forget: this workflow\ndoes not wait for the score).",
+        "width": 1340,
+        "height": 700,
+        "color": 6
+      }
+    },
+    {
+      "name": "Save CRM IDs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3800,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads\nSET crm_person_id = $2, crm_company_id = $3, crm_opportunity_id = $4,\n    status = CASE WHEN status = 'scored' THEN status ELSE 'synced' END\nWHERE id = $1\nRETURNING id, crm_person_id, crm_company_id, crm_opportunity_id;",
+        "options": {
+          "queryReplacement": "={{ [ $('Upsert Lead Row').item.json.id, $('Upsert Person').item.json.data.createPerson.id, $('Upsert Person').item.json.data.createPerson.companyId || null, $json.opportunityId ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "2123aada-ec96-497d-a5a4-d9b50898d9f6"
+    },
+    {
+      "name": "Has Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4020,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e1cbefc4-7541-40ec-a63b-cd914875490f",
+              "leftValue": "={{ $('Build Dedupe Key').item.json.lead.message }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "523dac47-bec2-4687-a384-febdce091644"
+    },
+    {
+      "name": "Create Note",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4240,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TWENTY_URL }}/rest/notes",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  title: 'Website inquiry ' + $now.toFormat('yyyy-MM-dd HH:mm'),\n  bodyV2: { markdown: $('Build Dedupe Key').item.json.lead.message },\n}) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": null,
+          "name": "Twenty – Muster"
+        }
+      },
+      "id": "aa99d44d-98cd-4c8d-ac19-6335646d36c6"
+    },
+    {
+      "name": "Link Note to Person & Opportunity",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4460,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TWENTY_URL }}/rest/batch/noteTargets",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify([\n  { noteId: $json.data.createNote.id, targetPersonId: $('Save CRM IDs').item.json.crm_person_id },\n  { noteId: $json.data.createNote.id, targetOpportunityId: $('Save CRM IDs').item.json.crm_opportunity_id },\n]) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": null,
+          "name": "Twenty – Muster"
+        }
+      },
+      "id": "bb54b340-0932-4d6e-a6ab-1a6f3c623409"
+    },
+    {
+      "name": "Log Lead Synced",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        4680,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO event_log (workflow_name, event_type, entity_type, entity_id, message, data, execution_id)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)\nRETURNING id AS event_id;",
+        "options": {
+          "queryReplacement": "={{ [ 'WF-01 Lead Intake', $('Upsert Lead Row').item.json.is_new ? 'lead.created' : 'lead.updated', 'lead', String($('Save CRM IDs').item.json.id), ($('Upsert Lead Row').item.json.is_new ? 'New lead ' : 'Repeat submission from ') + $('Build Dedupe Key').item.json.lead.email, JSON.stringify({ crm_person_id: $('Save CRM IDs').item.json.crm_person_id, crm_opportunity_id: $('Save CRM IDs').item.json.crm_opportunity_id, submission_count: $('Upsert Lead Row').item.json.submission_count }), $execution.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "1f7e44f9-7919-4ca9-a108-574c335d1008"
+    },
+    {
+      "name": "Prepare Scoring Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        4900,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c5e5519e-6120-473d-aa7a-352a868d2dd7",
+              "name": "leadId",
+              "value": "={{ $('Save CRM IDs').item.json.id }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d0ab9e28-5f58-479e-a4e0-99858c05aba1"
+    },
+    {
+      "name": "Score Lead (WF-02)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        5120,
+        300
+      ],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "o2cWf02LeadScore",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "id": "ae131262-0988-4e29-aeef-cd1f95d6c8f1"
+    }
+  ],
+  "connections": {
+    "Lead Form Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify HMAC Signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify HMAC Signature": {
+      "main": [
+        [
+          {
+            "node": "Signature Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signature Valid?": {
+      "main": [
+        [
+          {
+            "node": "Validate & Normalize Lead",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject 401",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reject 401": {
+      "main": [
+        [
+          {
+            "node": "Log Rejected Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Normalize Lead": {
+      "main": [
+        [
+          {
+            "node": "Lead Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lead Valid?": {
+      "main": [
+        [
+          {
+            "node": "Build Dedupe Key",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject 422",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reject 422": {
+      "main": [
+        [
+          {
+            "node": "Log Invalid Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Dedupe Key": {
+      "main": [
+        [
+          {
+            "node": "Upsert Lead Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Lead Row": {
+      "main": [
+        [
+          {
+            "node": "Accept 202",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Accept 202": {
+      "main": [
+        [
+          {
+            "node": "Has Company Info?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Company Info?": {
+      "main": [
+        [
+          {
+            "node": "Find Company",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Company": {
+      "main": [
+        [
+          {
+            "node": "Company Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Company Found?": {
+      "main": [
+        [
+          {
+            "node": "Use Found Company",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Company": {
+      "main": [
+        [
+          {
+            "node": "Use Created Company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Use Found Company": {
+      "main": [
+        [
+          {
+            "node": "Upsert Person",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Use Created Company": {
+      "main": [
+        [
+          {
+            "node": "Upsert Person",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No Company": {
+      "main": [
+        [
+          {
+            "node": "Upsert Person",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Person": {
+      "main": [
+        [
+          {
+            "node": "Needs Opportunity?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Opportunity?": {
+      "main": [
+        [
+          {
+            "node": "Create Opportunity",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Keep Existing Opportunity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Opportunity": {
+      "main": [
+        [
+          {
+            "node": "Use New Opportunity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Use New Opportunity": {
+      "main": [
+        [
+          {
+            "node": "Save CRM IDs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Keep Existing Opportunity": {
+      "main": [
+        [
+          {
+            "node": "Save CRM IDs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save CRM IDs": {
+      "main": [
+        [
+          {
+            "node": "Has Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Message?": {
+      "main": [
+        [
+          {
+            "node": "Create Note",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Lead Synced",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Note": {
+      "main": [
+        [
+          {
+            "node": "Link Note to Person & Opportunity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Link Note to Person & Opportunity": {
+      "main": [
+        [
+          {
+            "node": "Log Lead Synced",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Lead Synced": {
+      "main": [
+        [
+          {
+            "node": "Prepare Scoring Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Scoring Input": {
+      "main": [
+        [
+          {
+            "node": "Score Lead (WF-02)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Berlin",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "o2cWf07ErrorsHdl"
+  },
+  "pinData": {},
+  "tags": []
+}

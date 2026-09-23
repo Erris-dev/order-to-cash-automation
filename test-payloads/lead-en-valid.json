@@ -1,0 +1,12 @@
+{
+  "firstName": "Erik",
+  "lastName": "Lund",
+  "email": "erik.lund@nordic-catering.example",
+  "phone": "+46 8 123 456 78",
+  "company": "Nordic Catering AB",
+  "country": "SE",
+  "message": "Hi, we run 12 staff canteens in Stockholm and are looking for a supplier of disposable tableware and dry goods with weekly delivery. What are your minimum order quantities?",
+  "estimatedBudget": 120000,
+  "consent": true,
+  "source": "website-contact-form"
+}

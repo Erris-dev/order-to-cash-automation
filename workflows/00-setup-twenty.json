@@ -1,0 +1,418 @@
+{
+  "id": "o2cWf00SetupTwnt",
+  "name": "WF-00 Setup Twenty",
+  "active": false,
+  "nodes": [
+    {
+      "id": "af3d9f22-fd5b-428f-abd4-b23d231b2bbc",
+      "name": "Note: WF-00 · One-time Twenty setup (run manually)",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        -300
+      ],
+      "parameters": {
+        "content": "## WF-00 · One-time Twenty setup (run manually)\nClick **Execute workflow** once after the Twenty API key credential exists.\nIt is idempotent: running it again only fixes what is missing or changed.\n\n**Top:** adds the custom field **ERP Order Ref** (`erpOrderRef`) to opportunities.\nWF-03 writes the Odoo sales order number (e.g. S00012) into it.\n\n**Bottom:** registers (or updates) the Twenty webhook that sends\n`opportunity.updated` events to WF-03 at `TWENTY_WEBHOOK_TARGET_URL`,\nsigned with `TWENTY_WEBHOOK_SECRET`.",
+        "width": 1320,
+        "height": 300,
+        "color": 5
+      }
+    },
+    {
+      "name": "Run Setup",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {},
+      "id": "0dda6652-3eb3-469e-af5d-32cbc381860a"
+    },
+    {
+      "name": "Get Twenty Objects",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        100
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.TWENTY_URL }}/rest/metadata/objects?limit=200",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": null,
+          "name": "Twenty – Muster"
+        }
+      },
+      "id": "0dc6955d-1a8d-4826-a5bc-969158021757"
+    },
+    {
+      "name": "Plan Missing Custom Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        100
+      ],
+      "parameters": {
+        "jsCode": "const WANTED = [\n  { object: 'opportunity', name: 'erpOrderRef', label: 'ERP Order Ref', type: 'TEXT', icon: 'IconFileInvoice',\n    description: 'Odoo sales order reference, written by n8n (WF-03)' },\n  { object: 'opportunity', name: 'leadScore', label: 'Lead Score', type: 'NUMBER', icon: 'IconFlame',\n    description: 'AI lead score 0-100, written by n8n (WF-02)' },\n  { object: 'opportunity', name: 'leadScoreReason', label: 'Lead Score Reason', type: 'TEXT', icon: 'IconBulb',\n    description: 'Why the AI gave this score (WF-02)' },\n];\n\nconst objects = $json.data ?? [];\nconst toCreate = [];\nfor (const f of WANTED) {\n  const obj = objects.find((o) => o.nameSingular === f.object);\n  if (!obj) throw new Error('Twenty object not found: ' + f.object);\n  if ((obj.fields ?? []).some((x) => x.name === f.name)) continue;\n  toCreate.push({ json: {\n    objectMetadataId: obj.id, name: f.name, label: f.label, type: f.type,\n    icon: f.icon, description: f.description, isNullable: true,\n  } });\n}\nreturn toCreate; // empty -> nothing to do"
+      },
+      "id": "0bb512b9-eb7c-4843-af1b-d318ac553395"
+    },
+    {
+      "name": "Create Custom Field",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        100
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TWENTY_URL }}/rest/metadata/fields",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": null,
+          "name": "Twenty – Muster"
+        }
+      },
+      "id": "2fedbd49-9e4e-4619-ac66-d07352c5da39"
+    },
+    {
+      "name": "Log Field Created",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        960,
+        100
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO event_log (workflow_name, event_type, entity_type, entity_id, message, data, execution_id)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)\nRETURNING id AS event_id;",
+        "options": {
+          "queryReplacement": "={{ [ 'WF-00 Setup Twenty', 'setup.twenty_field_created', null, null, 'Created Twenty field ' + $('Plan Missing Custom Fields').item.json.name, JSON.stringify({}), $execution.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "56306446-295d-4a26-a2b8-d99de1ab5615"
+    },
+    {
+      "name": "Get Twenty Webhooks",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        360
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.TWENTY_URL }}/rest/metadata/webhooks",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": null,
+          "name": "Twenty – Muster"
+        }
+      },
+      "id": "1567f9b8-db8f-4ddd-a792-a332a87b923e"
+    },
+    {
+      "name": "Check Webhook Registration",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        360
+      ],
+      "parameters": {
+        "jsCode": "const target = $env.TWENTY_WEBHOOK_TARGET_URL;\nconst secret = $env.TWENTY_WEBHOOK_SECRET;\nif (!target || !secret) throw new Error('TWENTY_WEBHOOK_TARGET_URL / TWENTY_WEBHOOK_SECRET not set');\n\nconst existing = ($json.data ?? []).find((w) => w.targetUrl === target);\nreturn [{ json: {\n  existingId: existing?.id ?? '',\n  body: {\n    targetUrl: target,\n    operations: ['opportunity.updated'],\n    description: 'n8n WF-03 Deal Won -> ERP',\n    secret,\n  },\n} }];"
+      },
+      "id": "7d763399-112f-4d96-a6bb-408b8d9bc16b"
+    },
+    {
+      "name": "Webhook Exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        720,
+        360
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c4963222-a9e1-404f-a3e9-2a75e2c5688c",
+              "leftValue": "={{ $json.existingId }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "3ac9ddc4-9a9a-4c9c-a7cc-3df871ddbccd"
+    },
+    {
+      "name": "Update Twenty Webhook",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        280
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.TWENTY_URL }}/rest/metadata/webhooks/{{ $json.existingId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": null,
+          "name": "Twenty – Muster"
+        }
+      },
+      "id": "14403da5-94be-40c2-ad0f-963ebc12d99c"
+    },
+    {
+      "name": "Register Twenty Webhook",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        460
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TWENTY_URL }}/rest/metadata/webhooks",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": null,
+          "name": "Twenty – Muster"
+        }
+      },
+      "id": "be273400-04a4-44b4-a92e-8850bc86ee7c"
+    },
+    {
+      "name": "Log Webhook Ready",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1200,
+        360
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO event_log (workflow_name, event_type, entity_type, entity_id, message, data, execution_id)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)\nRETURNING id AS event_id;",
+        "options": {
+          "queryReplacement": "={{ [ 'WF-00 Setup Twenty', 'setup.twenty_webhook_ready', null, null, 'Twenty webhook -> ' + $('Check Webhook Registration').item.json.body.targetUrl, JSON.stringify({}), $execution.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "043680d6-7248-4472-ad5d-69da6a2eb6b2"
+    }
+  ],
+  "connections": {
+    "Run Setup": {
+      "main": [
+        [
+          {
+            "node": "Get Twenty Objects",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Twenty Webhooks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Twenty Objects": {
+      "main": [
+        [
+          {
+            "node": "Plan Missing Custom Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan Missing Custom Fields": {
+      "main": [
+        [
+          {
+            "node": "Create Custom Field",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Custom Field": {
+      "main": [
+        [
+          {
+            "node": "Log Field Created",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Twenty Webhooks": {
+      "main": [
+        [
+          {
+            "node": "Check Webhook Registration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Webhook Registration": {
+      "main": [
+        [
+          {
+            "node": "Webhook Exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Exists?": {
+      "main": [
+        [
+          {
+            "node": "Update Twenty Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Register Twenty Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Twenty Webhook": {
+      "main": [
+        [
+          {
+            "node": "Log Webhook Ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Register Twenty Webhook": {
+      "main": [
+        [
+          {
+            "node": "Log Webhook Ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Berlin",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "o2cWf07ErrorsHdl"
+  },
+  "pinData": {},
+  "tags": []
+}
