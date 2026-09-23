@@ -1,0 +1,17 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# local exports that may contain pinned execution data
+workflows/_export/
+*.bak
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# personal project notes (not published)
+PLAN.md

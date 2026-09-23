@@ -1,0 +1,8 @@
+# Everything uses LF, even on Windows checkouts (scripts run inside Linux containers).
+* text=auto eol=lf
+
+# Shell scripts and SQL are executed inside Linux containers – keep LF on Windows.
+*.sh   text eol=lf
+*.sql  text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
