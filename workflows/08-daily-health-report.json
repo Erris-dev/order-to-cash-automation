@@ -1,0 +1,207 @@
+{
+  "id": "o2cWf08HealthRpt",
+  "name": "WF-08 Daily Health Report",
+  "active": true,
+  "nodes": [
+    {
+      "id": "35f83a19-5451-444b-a9c0-a267de3997a0",
+      "name": "Note: WF-08 · Daily health report (08:00 Europe/Berlin)",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -300
+      ],
+      "parameters": {
+        "content": "## WF-08 · Daily health report (08:00 Europe/Berlin)\nOne SQL query over the project database (last 24 h): leads (new / repeat / hot / stuck),\norders created, invoices by outcome, review queue size and age, chatbot activity, workflow\nerrors (top 5), and the result of last night's reconciliation (WF-06).\n**Format Health Report** turns it into a traffic light:\n🔴 any workflow error or stuck lead · 🟡 review items older than 2 days or > 10 pending · 🟢 otherwise.\nSent every morning via **WF-10**, also on quiet days, so a silent failure is noticed.",
+        "width": 1180,
+        "height": 360,
+        "color": 5
+      }
+    },
+    {
+      "name": "Every Day 08:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * *"
+            }
+          ]
+        }
+      },
+      "id": "e27bfcdc-d8fe-4de5-a26a-b0b1b10e5ab5"
+    },
+    {
+      "name": "Run Now (manual)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        380
+      ],
+      "parameters": {},
+      "id": "4ce75378-6ed0-4117-ae66-ec48e1037d41"
+    },
+    {
+      "name": "Collect Metrics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        240,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH win AS (SELECT now() - interval '24 hours' AS since)\nSELECT\n  (SELECT count(*) FROM leads, win WHERE created_at > since)                                         AS leads_new,\n  (SELECT count(*) FROM event_log, win WHERE event_type = 'lead.updated' AND occurred_at > since)    AS leads_repeat,\n  (SELECT count(*) FROM leads, win WHERE scored_at > since AND ai_score >= $1 AND NOT ai_fallback)    AS leads_hot,\n  (SELECT round(avg(ai_score)) FROM leads, win WHERE scored_at > since)                              AS leads_avg_score,\n  (SELECT count(*) FROM leads, win WHERE scored_at > since AND ai_fallback)                          AS leads_fallback,\n  (SELECT count(*) FROM leads WHERE status = 'received' AND created_at < now() - interval '30 minutes') AS leads_stuck,\n  (SELECT count(*) FROM event_log, win WHERE event_type = 'order.created' AND occurred_at > since)   AS orders_created,\n  (SELECT coalesce(sum((data->>'amount_total')::numeric), 0) FROM event_log, win\n     WHERE event_type = 'order.created' AND occurred_at > since)                                     AS orders_value,\n  (SELECT coalesce(json_object_agg(status, n), '{}'::json) FROM\n     (SELECT status, count(*) n FROM documents, win WHERE updated_at > since GROUP BY status) d)     AS documents,\n  (SELECT count(*) FROM review_queue WHERE status = 'pending')                                        AS review_pending,\n  (SELECT coalesce(json_object_agg(item_type, n), '{}'::json) FROM\n     (SELECT item_type, count(*) n FROM review_queue WHERE status = 'pending' GROUP BY item_type) r) AS review_by_type,\n  (SELECT extract(day FROM now() - min(created_at))::int FROM review_queue WHERE status = 'pending') AS review_oldest_days,\n  (SELECT count(*) FROM event_log, win WHERE event_type = 'chat.escalated' AND occurred_at > since)  AS chat_escalations,\n  (SELECT count(*) FROM event_log, win WHERE event_type LIKE 'chat.order_lookup%' AND occurred_at > since) AS chat_lookups,\n  (SELECT count(*) FROM workflow_errors, win WHERE occurred_at > since)                              AS errors_24h,\n  (SELECT coalesce(json_agg(e), '[]'::json) FROM\n     (SELECT workflow_name, node_name, count(*) n, max(error_message) example\n      FROM workflow_errors, win WHERE occurred_at > since\n      GROUP BY workflow_name, node_name ORDER BY n DESC LIMIT 5) e)                                  AS top_errors,\n  (SELECT message || ' (' || to_char(occurred_at AT TIME ZONE 'Europe/Berlin', 'DD.MM. HH24:MI') || ')'\n     FROM event_log WHERE event_type = 'reconciliation.completed' ORDER BY id DESC LIMIT 1)          AS last_reconciliation;",
+        "options": {
+          "queryReplacement": "={{ [ Number($env.HOT_LEAD_THRESHOLD || 70) ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "93131840-92a3-46c3-aa60-a5e2a5f8c1a9"
+    },
+    {
+      "name": "Format Health Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        200
+      ],
+      "parameters": {
+        "jsCode": "const m = $json;\nconst n = (v) => Number(v ?? 0);\nconst esc = (s) => String(s ?? '').replace(/[&<>\"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;' }[c]));\nconst eur = (v) => n(v).toLocaleString('de-DE', { minimumFractionDigits: 2 }) + ' EUR';\n\nconst red = n(m.errors_24h) > 0 || n(m.leads_stuck) > 0;\nconst amber = !red && (n(m.review_oldest_days) > 2 || n(m.review_pending) > 10);\nconst light = red ? '🔴' : amber ? '🟡' : '🟢';\nconst docs = m.documents ?? {};\nconst row = (k, v) => '<tr><td>' + k + '</td><td align=\"right\"><b>' + v + '</b></td></tr>';\n\nconst html = [\n  '<h3>' + light + ' Tagesbericht / Daily health report – ' + $now.setZone('Europe/Berlin').toFormat('dd.MM.yyyy') + '</h3>',\n  '<p>Last 24 hours, Muster GmbH order-to-cash automation.</p>',\n  '<table cellpadding=\"4\">',\n  '<tr><td colspan=\"2\"><b>Leads</b></td></tr>',\n  row('New leads / Neue Leads', n(m.leads_new)),\n  row('Repeat submissions', n(m.leads_repeat)),\n  row('Hot leads (AI score ≥ ' + ($env.HOT_LEAD_THRESHOLD || 70) + ')', n(m.leads_hot)),\n  row('Average AI score', m.leads_avg_score ?? '-'),\n  row('Scored by fallback (AI unavailable)', n(m.leads_fallback)),\n  row('Stuck before CRM sync', n(m.leads_stuck)),\n  '<tr><td colspan=\"2\"><b>Orders & invoices</b></td></tr>',\n  row('Sales orders created in Odoo', n(m.orders_created) + ' (' + eur(m.orders_value) + ' gross)'),\n  row('Invoices booked automatically', n(docs.booked)),\n  row('Invoices sent to review', n(docs.needs_review)),\n  row('Invoices approved by a person', n(docs.approved)),\n  row('Documents rejected (not an invoice)', n(docs.rejected)),\n  '<tr><td colspan=\"2\"><b>Review queue & support</b></td></tr>',\n  row('Pending review items', n(m.review_pending) + ' ' + esc(JSON.stringify(m.review_by_type ?? {}))),\n  row('Oldest pending (days)', m.review_oldest_days ?? '-'),\n  row('Chat order lookups / escalations', n(m.chat_lookups) + ' / ' + n(m.chat_escalations)),\n  '<tr><td colspan=\"2\"><b>Operations</b></td></tr>',\n  row('Workflow errors', n(m.errors_24h)),\n  '</table>',\n  (m.top_errors ?? []).length\n    ? '<h4>Top errors</h4><ul>' + m.top_errors.map((e) => '<li>' + esc(e.workflow_name) + ' › ' + esc(e.node_name) + ': ' + e.n + '× – ' + esc(String(e.example).slice(0, 140)) + '</li>').join('') + '</ul>'\n    : '',\n  '<p>Last reconciliation: ' + esc(m.last_reconciliation ?? 'none yet') + '</p>',\n].join('\\n');\n\nreturn [{ json: {\n  subject: light + ' Tagesbericht / Daily report: ' + n(m.leads_new) + ' leads, ' + n(m.orders_created) + ' orders, ' +\n    n(m.errors_24h) + ' errors, ' + n(m.review_pending) + ' to review',\n  html,\n  status: red ? 'red' : amber ? 'amber' : 'green',\n} }];"
+      },
+      "id": "853f6d4b-5465-4fa1-a0f7-89ba8474ced4"
+    },
+    {
+      "name": "Send Report (WF-10)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        720,
+        200
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "o2cWf10SendNotif",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "e1046ef6-46c3-475b-a2e8-1c9675b015f7"
+    },
+    {
+      "name": "Log Report Sent",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        960,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO event_log (workflow_name, event_type, entity_type, entity_id, message, data, execution_id)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)\nRETURNING id AS event_id;",
+        "options": {
+          "queryReplacement": "={{ [ 'WF-08 Daily Health Report', 'report.health_sent', null, null, $('Format Health Report').first().json.subject, JSON.stringify({ status: $('Format Health Report').first().json.status }), $execution.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "1060abf0-8ef8-4dca-a7cb-4b98ba6962a1"
+    }
+  ],
+  "connections": {
+    "Run Now (manual)": {
+      "main": [
+        [
+          {
+            "node": "Collect Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every Day 08:00": {
+      "main": [
+        [
+          {
+            "node": "Collect Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Metrics": {
+      "main": [
+        [
+          {
+            "node": "Format Health Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Health Report": {
+      "main": [
+        [
+          {
+            "node": "Send Report (WF-10)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Report (WF-10)": {
+      "main": [
+        [
+          {
+            "node": "Log Report Sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Berlin",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "o2cWf07ErrorsHdl"
+  },
+  "pinData": {},
+  "tags": []
+}

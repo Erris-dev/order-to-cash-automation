@@ -1,0 +1,638 @@
+{
+  "id": "o2cWf06Reconcile",
+  "name": "WF-06 CRM-ERP Reconciliation",
+  "active": true,
+  "nodes": [
+    {
+      "id": "ff44ae3b-9d20-45ae-aa58-2b6e0e1919d0",
+      "name": "Note: 1 · Load both sides (nightly 02:00)",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -260
+      ],
+      "parameters": {
+        "content": "## 1 · Load both sides (nightly 02:00)\nLoads `sync_map` + leads stuck before the CRM sync (Postgres), won opportunities and companies\n(Twenty), and the mapped sales orders and customers (Odoo). Each source is one call.\nDemo-scale limits: 200 records per Twenty list. Paginate with `startingAfter` for real volumes.",
+        "width": 1340,
+        "height": 520,
+        "color": 7
+      }
+    },
+    {
+      "name": "Nightly 02:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 2 * * *"
+            }
+          ]
+        }
+      },
+      "id": "81858409-fd45-4cba-a479-fe63ff6fcfed"
+    },
+    {
+      "name": "Run Now (manual)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        380
+      ],
+      "parameters": {},
+      "id": "232f6868-7861-4ffc-a318-f2372c011070"
+    },
+    {
+      "name": "Load Sync Map & Stuck Leads",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        220,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  (SELECT coalesce(json_agg(s), '[]'::json) FROM sync_map s) AS sync_map,\n  (SELECT coalesce(json_agg(l), '[]'::json) FROM (\n     SELECT id, email, company, created_at FROM leads\n     WHERE status = 'received' AND created_at < now() - interval '30 minutes') l) AS stuck_leads;",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "5e401a77-d79b-4876-ab16-28027fba282e"
+    },
+    {
+      "name": "Get Won Opportunities",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.TWENTY_URL }}/rest/opportunities?limit=200&filter={{ encodeURIComponent('stage[eq]:CUSTOMER') }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": null,
+          "name": "Twenty – Muster"
+        }
+      },
+      "id": "864aaaf8-e86e-4661-ad47-0a5b4a82af21"
+    },
+    {
+      "name": "Get Twenty Companies",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.TWENTY_URL }}/rest/companies?limit=200",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": null,
+          "name": "Twenty – Muster"
+        }
+      },
+      "id": "380dbf34-b905-4afc-afaa-a75f6721550c"
+    },
+    {
+      "name": "Get Mapped Orders",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ODOO_URL }}/json/2/sale.order/search_read",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "odooApiKeyApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "={{ $env.ODOO_DB }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  domain: [['id', 'in', $('Load Sync Map & Stuck Leads').first().json.sync_map.filter((r) => r.entity_type === 'order').map((r) => r.odoo_id)]],\n  fields: ['name', 'state', 'amount_untaxed', 'partner_id'],\n}) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "odooApiKeyApi": {
+          "id": null,
+          "name": "Odoo – Muster"
+        }
+      },
+      "id": "8a2d2d52-9404-4c0d-afd7-79b384e77066"
+    },
+    {
+      "name": "Get Mapped Customers",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ODOO_URL }}/json/2/res.partner/search_read",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "odooApiKeyApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "={{ $env.ODOO_DB }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  domain: [['id', 'in', $('Load Sync Map & Stuck Leads').first().json.sync_map.filter((r) => r.entity_type === 'customer').map((r) => r.odoo_id)]],\n  fields: ['name'],\n  context: { active_test: false },\n}) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "odooApiKeyApi": {
+          "id": null,
+          "name": "Odoo – Muster"
+        }
+      },
+      "id": "516edcde-a7f7-465e-a48b-2871a61a0c36"
+    },
+    {
+      "id": "115167d4-3f1d-4d0a-a6ff-21523f56ae54",
+      "name": "Note: 2 · Compare & decide",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1300,
+        -260
+      ],
+      "parameters": {
+        "content": "## 2 · Compare & decide\n**Auto-fixed (safe, idempotent):**\n- Twenty *ERP Order Ref* missing or different from the Odoo order number → rewritten.\n- Opportunity at **CUSTOMER** with no order in `sync_map` (missed webhook) → a signed\n  `opportunity.updated` event is **replayed to WF-03**. WF-03 is idempotent, so a replay can never create a second order.\n\n**Needs a human** (→ `review_queue` as `sync_mismatch`, deduplicated by key):\namount differs (Twenty vs Odoo net), Odoo order cancelled or missing, order exists but the\nopportunity is no longer won, customer name differs or a record was deleted, lead not synced to Twenty.",
+        "width": 700,
+        "height": 520,
+        "color": 4
+      }
+    },
+    {
+      "name": "Compare Twenty and Odoo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        200
+      ],
+      "parameters": {
+        "jsCode": "const db = $('Load Sync Map & Stuck Leads').first().json;\nconst opps = $('Get Won Opportunities').first().json.data.opportunities;\nconst companies = new Map($('Get Twenty Companies').first().json.data.companies.map((c) => [c.id, c]));\nconst orders = new Map($('Get Mapped Orders').first().json.body.map((o) => [o.id, o]));\nconst partners = new Map($('Get Mapped Customers').first().json.body.map((p) => [p.id, p]));\nconst orderMap = db.sync_map.filter((r) => r.entity_type === 'order');\nconst customerMap = db.sync_map.filter((r) => r.entity_type === 'customer');\nconst norm = (s) => String(s ?? '').trim().toLowerCase().replace(/\\s+/g, ' ');\nconst eur = (n) => Number(n).toLocaleString('de-DE', { minimumFractionDigits: 2 }) + ' EUR';\n\nconst fixRefs = [];\nconst replays = [];\nconst issues = [];\nconst issue = (key, kind, text) => issues.push({ key, kind, text });\n\nfor (const opp of opps) {\n  const m = orderMap.find((r) => r.crm_id === opp.id);\n  if (!m) { replays.push({ opportunityId: opp.id, name: opp.name }); continue; }\n  const order = orders.get(m.odoo_id);\n  if (!order) { issue('order-missing:' + opp.id, 'order_missing_in_odoo', opp.name + ': Odoo order ' + m.odoo_name + ' (id ' + m.odoo_id + ') no longer exists'); continue; }\n  if (order.state === 'cancel') issue('order-cancelled:' + opp.id, 'order_cancelled', opp.name + ': won in Twenty, but Odoo order ' + order.name + ' is cancelled');\n  const oppAmount = opp.amount?.amountMicros != null ? opp.amount.amountMicros / 1e6 : null;\n  if (oppAmount !== null && Math.abs(oppAmount - order.amount_untaxed) > 0.01) {\n    issue('amount:' + opp.id + ':' + oppAmount + ':' + order.amount_untaxed, 'amount_mismatch',\n      opp.name + ': Twenty amount ' + eur(oppAmount) + ' vs Odoo ' + order.name + ' net ' + eur(order.amount_untaxed));\n  }\n  if ((opp.erpOrderRef ?? '') !== order.name) fixRefs.push({ opportunityId: opp.id, name: opp.name, expected: order.name, actual: opp.erpOrderRef || null });\n}\n\nconst wonIds = new Set(opps.map((o) => o.id));\nfor (const m of orderMap) {\n  if (!wonIds.has(m.crm_id)) issue('not-won:' + m.crm_id, 'opportunity_not_won', 'Odoo order ' + m.odoo_name + ' exists, but its Twenty opportunity is no longer at stage CUSTOMER (or was deleted)');\n}\n\nfor (const m of customerMap.filter((r) => r.crm_object === 'companies')) {\n  const c = companies.get(m.crm_id);\n  const p = partners.get(m.odoo_id);\n  if (!c) issue('company-missing:' + m.crm_id, 'company_missing_in_crm', 'Odoo customer ' + m.odoo_name + ' (id ' + m.odoo_id + ') has no company in Twenty any more');\n  else if (!p) issue('partner-missing:' + m.odoo_id, 'customer_missing_in_odoo', 'Twenty company ' + c.name + ': Odoo customer id ' + m.odoo_id + ' no longer exists');\n  else if (norm(c.name) !== norm(p.name)) issue('name:' + m.crm_id + ':' + norm(c.name) + ':' + norm(p.name), 'name_mismatch', 'Customer name differs: Twenty \"' + c.name + '\" vs Odoo \"' + p.name + '\"');\n}\n\nfor (const l of db.stuck_leads) {\n  issue('stuck-lead:' + l.id, 'lead_not_synced', 'Lead ' + l.id + ' (' + l.email + ', ' + (l.company || 'no company') + ') was never synced to Twenty (received ' + String(l.created_at).slice(0, 16) + '). Resend it or check WF-01 errors.');\n}\n\nreturn [{ json: {\n  fixRefs, replays, issues,\n  stats: { opportunitiesWon: opps.length, ordersMapped: orderMap.length, customersMapped: customerMap.length, stuckLeads: db.stuck_leads.length },\n} }];"
+      },
+      "id": "fe205e8c-b87e-42e7-a7dc-672fa132d184"
+    },
+    {
+      "id": "b5b64d46-3b80-43fc-afad-d9dccb4ffd39",
+      "name": "Note: 3 · Apply safe fixes, record issues, report",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1980,
+        -260
+      ],
+      "parameters": {
+        "content": "## 3 · Apply safe fixes, record issues, report\nFixes run first (Twenty PATCH / signed replay to WF-03), then every issue is upserted into\n`review_queue` with a fresh single-use token, so the links in tonight's report work (handled by **WF-09**).\nThe report always goes out, also when everything matches, so a silent failure is noticed.",
+        "width": 1580,
+        "height": 760,
+        "color": 6
+      }
+    },
+    {
+      "name": "List Ref Fixes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2020,
+        0
+      ],
+      "parameters": {
+        "jsCode": "return $('Compare Twenty and Odoo').first().json.fixRefs.map((f) => ({ json: f }));"
+      },
+      "id": "17009f06-c723-412e-ab8c-57cc4a1356d7"
+    },
+    {
+      "name": "Fix ERP Ref in Twenty",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2240,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.TWENTY_URL }}/rest/opportunities/{{ $json.opportunityId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ erpOrderRef: $json.expected }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": null,
+          "name": "Twenty – Muster"
+        }
+      },
+      "id": "9003cb9e-9eef-449f-a897-b0ca5da6bf44"
+    },
+    {
+      "name": "Sign Replay Events",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2020,
+        200
+      ],
+      "parameters": {
+        "jsCode": "// Same format and signature as Twenty: HMAC_SHA256(secret, timestamp + \":\" + body)\nconst crypto = require('crypto');\nreturn $('Compare Twenty and Odoo').first().json.replays.map((r) => {\n  const body = JSON.stringify({\n    eventName: 'opportunity.updated',\n    objectMetadata: { nameSingular: 'opportunity' },\n    record: { id: r.opportunityId, name: r.name, stage: 'CUSTOMER' },\n    updatedFields: ['stage'],\n    replayedBy: 'WF-06 reconciliation',\n  });\n  const ts = String(Date.now());\n  const sig = crypto.createHmac('sha256', $env.TWENTY_WEBHOOK_SECRET).update(ts + ':' + body).digest('hex');\n  return { json: { ...r, body, ts, sig } };\n});"
+      },
+      "id": "36d6b5ea-23f3-4108-a862-acf4a8d90e31"
+    },
+    {
+      "name": "Replay Win to WF-03",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2240,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TWENTY_WEBHOOK_TARGET_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Twenty-Webhook-Timestamp",
+              "value": "={{ $json.ts }}"
+            },
+            {
+              "name": "X-Twenty-Webhook-Signature",
+              "value": "={{ $json.sig }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.body }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "dcaebe12-ff82-4ab3-abf8-9291864aec2f"
+    },
+    {
+      "name": "List Issues",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2020,
+        400
+      ],
+      "parameters": {
+        "jsCode": "// One item per issue, each with a fresh review token. Always returns at least one item\n// (a \"none\" placeholder), so the report below also runs on clean nights.\nconst crypto = require('crypto');\nconst issues = $('Compare Twenty and Odoo').first().json.issues;\nif (!issues.length) return [{ json: { none: true, key: '', kind: '', text: '', tokenHash: '', token: '' } }];\nreturn issues.map((i) => {\n  const token = crypto.randomBytes(24).toString('base64url');\n  return { json: { ...i, none: false, token, tokenHash: crypto.createHash('sha256').update(token).digest('hex') } };\n});"
+      },
+      "id": "2f91b1ff-6a4e-4aff-a8c6-7c76e53c12e1"
+    },
+    {
+      "name": "Upsert Review Item",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2240,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH updated AS (\n  UPDATE review_queue SET approval_token_hash = $4, reason = $2, updated_at = now()\n  WHERE NOT $5::boolean AND item_type = 'sync_mismatch' AND status = 'pending' AND payload->>'key' = $1\n  RETURNING id\n), inserted AS (\n  INSERT INTO review_queue (item_type, reason, payload, approval_token_hash)\n  SELECT 'sync_mismatch', $2, jsonb_build_object('key', $1, 'kind', $3), $4\n  WHERE NOT $5::boolean AND NOT EXISTS (SELECT 1 FROM updated)\n  RETURNING id\n)\nSELECT (SELECT id FROM updated UNION ALL SELECT id FROM inserted LIMIT 1) AS review_id,\n       EXISTS (SELECT 1 FROM inserted) AS is_new;",
+        "options": {
+          "queryReplacement": "={{ [ $json.key, $json.text, $json.kind, $json.tokenHash, $json.none ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "85c98846-4b71-42c9-a376-94d03ade507b"
+    },
+    {
+      "name": "Format Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2460,
+        400
+      ],
+      "parameters": {
+        "jsCode": "const cmp = $('Compare Twenty and Odoo').first().json;\nconst listed = $('List Issues').all().map((i) => i.json);\nconst saved = $input.all().map((i) => i.json);\nconst esc = (s) => String(s ?? '').replace(/[&<>\"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;' }[c]));\nconst link = (id, token, d) => $env.WEBHOOK_URL + 'webhook/review-decision?id=' + id + '&token=' + token + '&decision=' + d;\n\nconst issues = listed.filter((i) => !i.none).map((i, n) => ({ ...i, reviewId: saved[n]?.review_id, isNew: saved[n]?.is_new }));\nconst fixed = $('Fix ERP Ref in Twenty').isExecuted ? cmp.fixRefs : [];\nconst replayed = $('Replay Win to WF-03').isExecuted ? cmp.replays : [];\n\nconst section = (title, rows) => rows.length ? '<h4>' + title + '</h4><ul>' + rows.join('') + '</ul>' : '';\nconst html = [\n  '<h3>Abgleich CRM ↔ ERP / CRM ↔ ERP reconciliation</h3>',\n  '<p>Checked: ' + cmp.stats.opportunitiesWon + ' won opportunities, ' + cmp.stats.ordersMapped + ' orders, ' +\n    cmp.stats.customersMapped + ' customers.</p>',\n  !issues.length && !fixed.length && !replayed.length ? '<p>✅ Twenty and Odoo are consistent. / Alles konsistent.</p>' : '',\n  section('Automatisch korrigiert / Fixed automatically', [\n    ...fixed.map((f) => '<li>' + esc(f.name) + ': ERP Order Ref ' + esc(f.actual ?? '(empty)') + ' → <b>' + esc(f.expected) + '</b></li>'),\n    ...replayed.map((r) => '<li>' + esc(r.name) + ': won but no Odoo order. Event replayed to WF-03, order is being created</li>'),\n  ]),\n  section('Bitte prüfen / Needs attention', issues.map((i) =>\n    '<li>' + esc(i.text) + (i.isNew ? ' <i>(new)</i>' : '') + '<br>' +\n    '<a href=\"' + link(i.reviewId, i.token, 'approve') + '\">✅ Erledigt / Resolved</a> &nbsp; ' +\n    '<a href=\"' + link(i.reviewId, i.token, 'reject') + '\">✖ Ignorieren / Dismiss</a></li>')),\n].join('\\n');\n\nreturn [{ json: {\n  subject: 'Abgleich CRM↔ERP / Reconciliation: ' + (issues.length ? issues.length + ' issue(s)' : 'OK') +\n    (fixed.length + replayed.length ? ', ' + (fixed.length + replayed.length) + ' fixed' : ''),\n  html,\n  counts: { issues: issues.length, newIssues: issues.filter((i) => i.isNew).length, fixedRefs: fixed.length, replayedWins: replayed.length, ...cmp.stats },\n} }];"
+      },
+      "id": "c18a438d-e7e3-4deb-ac10-b07021f71154"
+    },
+    {
+      "name": "Send Report (WF-10)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2680,
+        400
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "o2cWf10SendNotif",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "222ca174-e755-4a6f-a6b3-e035e05cc449"
+    },
+    {
+      "name": "Log Reconciliation",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2900,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO event_log (workflow_name, event_type, entity_type, entity_id, message, data, execution_id)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)\nRETURNING id AS event_id;",
+        "options": {
+          "queryReplacement": "={{ [ 'WF-06 CRM-ERP Reconciliation', 'reconciliation.completed', null, null, $('Format Report').first().json.subject, JSON.stringify($('Format Report').first().json.counts), $execution.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "58f0cdcf-5d10-4d83-a7e1-c5f2325892bf"
+    }
+  ],
+  "connections": {
+    "Run Now (manual)": {
+      "main": [
+        [
+          {
+            "node": "Load Sync Map & Stuck Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nightly 02:00": {
+      "main": [
+        [
+          {
+            "node": "Load Sync Map & Stuck Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Sync Map & Stuck Leads": {
+      "main": [
+        [
+          {
+            "node": "Get Won Opportunities",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Won Opportunities": {
+      "main": [
+        [
+          {
+            "node": "Get Twenty Companies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Twenty Companies": {
+      "main": [
+        [
+          {
+            "node": "Get Mapped Orders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Mapped Orders": {
+      "main": [
+        [
+          {
+            "node": "Get Mapped Customers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Mapped Customers": {
+      "main": [
+        [
+          {
+            "node": "Compare Twenty and Odoo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compare Twenty and Odoo": {
+      "main": [
+        [
+          {
+            "node": "List Ref Fixes",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Sign Replay Events",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "List Issues",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Ref Fixes": {
+      "main": [
+        [
+          {
+            "node": "Fix ERP Ref in Twenty",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sign Replay Events": {
+      "main": [
+        [
+          {
+            "node": "Replay Win to WF-03",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Issues": {
+      "main": [
+        [
+          {
+            "node": "Upsert Review Item",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Review Item": {
+      "main": [
+        [
+          {
+            "node": "Format Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Report": {
+      "main": [
+        [
+          {
+            "node": "Send Report (WF-10)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Report (WF-10)": {
+      "main": [
+        [
+          {
+            "node": "Log Reconciliation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Berlin",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "o2cWf07ErrorsHdl"
+  },
+  "pinData": {},
+  "tags": []
+}
