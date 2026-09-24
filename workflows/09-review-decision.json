@@ -1,0 +1,787 @@
+{
+  "id": "o2cWf09ReviewDec",
+  "name": "WF-09 Review Decision",
+  "active": true,
+  "nodes": [
+    {
+      "id": "c3f952ff-1cac-4d84-acca-29cc9eaf9a43",
+      "name": "Note: WF-09 · Approve / reject from the review email",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -460
+      ],
+      "parameters": {
+        "content": "## WF-09 · Approve / reject from the review email\nReview emails (WF-04 invoices, WF-05d chat tickets, WF-06 sync mismatches) contain links like\n`/webhook/review-decision?id=12&token=…&decision=approve`.\n\n**GET** only shows a confirmation page. Email security scanners open every link in a mail,\nso a GET must never change anything. The page's button **POSTs** the decision.\n**Claim Review Item** sets the status in one `UPDATE … WHERE status = 'pending' AND token hash matches`:\na link works **once**, a double click can't run the decision twice, and the token hash is wiped afterwards.\n\nDecisions:\n- **document + approve** → **WF-04b** creates a *draft* vendor bill in Odoo (with the PDF) for the accountant\n- **document + reject** → document status `rejected`\n- **support_request / sync_mismatch** → marked resolved (approve) or dismissed (reject)",
+        "width": 1300,
+        "height": 440,
+        "color": 5
+      }
+    },
+    {
+      "name": "Open Link (GET)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        160
+      ],
+      "webhookId": "79d2a38c-d708-4698-a979-bc6c8d2fef15",
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "review-decision",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "24c59586-23ea-43b3-a961-b7cbe01e5065"
+    },
+    {
+      "name": "Submit Decision (POST)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        360
+      ],
+      "webhookId": "79d2a38c-d708-4698-a979-bc6c8d2fef15",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "review-decision",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "bd2aaf2d-cdb9-4e0c-acfe-2923c00bf01e"
+    },
+    {
+      "name": "Read Link Parameters",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        260
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// GET carries the parameters in the query string, the confirmation form POSTs them as body fields.\nconst submitted = Object.keys($json.body ?? {}).length > 0;\nconst p = submitted ? $json.body : ($json.query ?? {});\nconst id = Number(p.id);\nreturn { json: {\n  id: Number.isInteger(id) && id > 0 ? id : 0,\n  token: String(p.token ?? ''),\n  decision: ['approve', 'reject'].includes(p.decision) ? p.decision : '',\n  submitted,\n} };"
+      },
+      "id": "ae2d1b21-bee4-42e1-ab54-edac28698cff"
+    },
+    {
+      "name": "Load Review Item",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        440,
+        260
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "alwaysOutputData": true,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, item_type, item_id, status, reason, approval_token_hash FROM review_queue WHERE id = $1;",
+        "options": {
+          "queryReplacement": "={{ [ $json.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "f0e14bca-7c14-4c82-ac92-c32ac8950d7f"
+    },
+    {
+      "name": "Check Link",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        260
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const crypto = require('crypto');\nconst link = $('Read Link Parameters').item.json;\nconst row = $json;\nlet problem = null;\nif (!row.id) problem = 'unknown review item';\nelse if (!link.decision) problem = 'invalid decision';\nelse if (row.status !== 'pending' || !row.approval_token_hash) problem = 'already decided (' + row.status + ')';\nelse {\n  const given = crypto.createHash('sha256').update(link.token).digest();\n  const stored = Buffer.from(row.approval_token_hash, 'hex');\n  if (stored.length !== given.length || !crypto.timingSafeEqual(given, stored)) problem = 'invalid token';\n}\nreturn { json: { valid: !problem, problem, item: row.id ? { id: row.id, type: row.item_type, itemId: row.item_id, reason: row.reason } : null } };"
+      },
+      "id": "aed2e864-85e7-476e-ac5f-22a5c17dff28"
+    },
+    {
+      "name": "Link Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        260
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "9d8c6476-087a-471e-a10b-36181e0a4a29",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "77d91059-dbd1-4070-a447-2eb1faf72c4a"
+    },
+    {
+      "name": "Build Invalid Page",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        480
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const page = (title, body, color = '#1f6feb') => '<!doctype html><html lang=\"de\"><head><meta charset=\"utf-8\">' +\n  '<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>' + title + '</title>' +\n  '<style>body{font-family:system-ui,sans-serif;max-width:560px;margin:48px auto;padding:0 16px;color:#222}' +\n  'h1{font-size:22px;color:' + color + '}button{font-size:16px;padding:10px 18px;border:0;border-radius:6px;' +\n  'background:' + color + ';color:#fff;cursor:pointer}.muted{color:#666;font-size:14px}</style></head><body>' +\n  '<h1>' + title + '</h1>' + body + '<p class=\"muted\">Muster GmbH · n8n review queue</p></body></html>';\nconst esc = (s) => String(s ?? '').replace(/[&<>\"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;' }[c]));\n\nconst why = $json.problem ?? 'unknown';\nreturn { json: { html: page('Link ungültig / Link not valid',\n  '<p>Dieser Link ist ungültig oder wurde bereits verwendet.<br>This link is invalid or has already been used.</p>' +\n  '<p class=\"muted\">Reason: ' + esc(why) + '</p>', '#b42318') } };"
+      },
+      "id": "eed1b0a9-9468-4b06-ab0d-5d83c4bb9553"
+    },
+    {
+      "name": "Respond Invalid",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1320,
+        480
+      ],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseCode": 403,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "id": "cd466fed-6485-403c-a0c4-0f497a58369a"
+    },
+    {
+      "name": "Submitted?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1100,
+        260
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "026ad6d5-bb04-47dc-a5a5-7a53cf3d0b17",
+              "leftValue": "={{ $('Read Link Parameters').item.json.submitted }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "612c154e-62bf-47d3-a79d-907f29025720"
+    },
+    {
+      "name": "Build Confirmation Page",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        100
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const page = (title, body, color = '#1f6feb') => '<!doctype html><html lang=\"de\"><head><meta charset=\"utf-8\">' +\n  '<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>' + title + '</title>' +\n  '<style>body{font-family:system-ui,sans-serif;max-width:560px;margin:48px auto;padding:0 16px;color:#222}' +\n  'h1{font-size:22px;color:' + color + '}button{font-size:16px;padding:10px 18px;border:0;border-radius:6px;' +\n  'background:' + color + ';color:#fff;cursor:pointer}.muted{color:#666;font-size:14px}</style></head><body>' +\n  '<h1>' + title + '</h1>' + body + '<p class=\"muted\">Muster GmbH · n8n review queue</p></body></html>';\nconst esc = (s) => String(s ?? '').replace(/[&<>\"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;' }[c]));\n\nconst link = $('Read Link Parameters').item.json;\nconst item = $json.item;\nconst approve = link.decision === 'approve';\nconst what = {\n  document: approve ? 'Freigeben: Entwurfsrechnung in Odoo anlegen / Approve: create a draft vendor bill in Odoo'\n                    : 'Ablehnen: Beleg wird nicht gebucht / Reject: the document will not be booked',\n  support_request: approve ? 'Als erledigt markieren / Mark as resolved' : 'Verwerfen / Dismiss',\n  sync_mismatch: approve ? 'Als erledigt markieren / Mark as resolved' : 'Verwerfen / Dismiss',\n}[item.type] ?? link.decision;\nconst hidden = (n, v) => '<input type=\"hidden\" name=\"' + n + '\" value=\"' + esc(v) + '\">';\nreturn { json: { html: page('Review #' + item.id + ' – ' + (approve ? 'Approve' : 'Reject'),\n  '<p><b>' + esc(item.type) + (item.itemId ? ' #' + item.itemId : '') + '</b></p>' +\n  '<p>' + esc(item.reason) + '</p>' +\n  '<p>' + esc(what) + '</p>' +\n  '<form method=\"post\">' + hidden('id', item.id) + hidden('token', link.token) + hidden('decision', link.decision) +\n  '<button type=\"submit\">' + (approve ? 'Bestätigen / Confirm' : 'Ablehnen bestätigen / Confirm rejection') + '</button></form>',\n  approve ? '#1a7f37' : '#b42318') } };"
+      },
+      "id": "f4646bb2-9e4f-4766-a4ed-adfb5af53055"
+    },
+    {
+      "name": "Respond Confirmation Page",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1540,
+        100
+      ],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "id": "bbc7d46e-b404-4c53-a481-8c6e39231eb5"
+    },
+    {
+      "name": "Claim Review Item",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1320,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "alwaysOutputData": true,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE review_queue\nSET status = $2, decided_at = now(), decided_by = 'email link', approval_token_hash = NULL\nWHERE id = $1 AND status = 'pending' AND approval_token_hash = $3\nRETURNING id, item_type, item_id, status;",
+        "options": {
+          "queryReplacement": "={{ [ $('Read Link Parameters').item.json.id, $('Read Link Parameters').item.json.decision === 'approve' ? 'approved' : 'rejected', $('Load Review Item').item.json.approval_token_hash ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "43dc2a7c-3771-4154-a0a4-49106dd0aff8"
+    },
+    {
+      "name": "Claimed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "188fcf19-1ae5-4506-a6d6-904e0f0009a3",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "ffefd518-21dc-42d3-afd1-406da452c692"
+    },
+    {
+      "name": "Approve Document?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1760,
+        260
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "65a4c45a-f575-4436-a951-6e571e2ed489",
+              "leftValue": "={{ $json.item_type }}",
+              "rightValue": "document",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "acb73aa1-eccb-48b4-a337-1df55067fda4",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "approved",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "ded345b6-4b42-4ddd-a5bf-bd58c37e0ce7"
+    },
+    {
+      "name": "Prepare Draft Booking",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1980,
+        160
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "8f3754db-8750-409c-a793-5ffebd1b1e4c",
+              "name": "documentId",
+              "value": "={{ $('Claim Review Item').item.json.item_id }}",
+              "type": "number"
+            },
+            {
+              "id": "79ab7c7f-49be-48a1-a7c2-60ff2073efe3",
+              "name": "post",
+              "value": "={{ false }}",
+              "type": "boolean"
+            },
+            {
+              "id": "b3e21751-8daf-4332-a5d1-948494e4972e",
+              "name": "approvedBy",
+              "value": "={{ 'review link #' + $('Claim Review Item').item.json.id }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "966f4e6d-5c15-45ca-adda-77c42a81b024"
+    },
+    {
+      "name": "Create Draft Bill (WF-04b)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2200,
+        160
+      ],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "o2cWf04bBookBill",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "996a86ed-bd36-4036-a854-fa00a477e2a3"
+    },
+    {
+      "name": "Apply Decision to Item",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1980,
+        380
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "alwaysOutputData": true,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE documents SET status = 'rejected'\nWHERE $2 = 'document' AND $3 = 'rejected' AND id = $1\nRETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $('Claim Review Item').item.json.item_id, $('Claim Review Item').item.json.item_type, $('Claim Review Item').item.json.status ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "62c28812-f939-4839-a34e-d1214e561cb5"
+    },
+    {
+      "name": "Log Decision",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2420,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO event_log (workflow_name, event_type, entity_type, entity_id, message, data, execution_id)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)\nRETURNING id AS event_id;",
+        "options": {
+          "queryReplacement": "={{ [ 'WF-09 Review Decision', 'review.' + $('Claim Review Item').item.json.status, 'review_queue', String($('Claim Review Item').item.json.id), 'Review #' + $('Claim Review Item').item.json.id + ' (' + $('Claim Review Item').item.json.item_type + ') ' + $('Claim Review Item').item.json.status + ' via email link', JSON.stringify({ item_type: $('Claim Review Item').item.json.item_type, item_id: $('Claim Review Item').item.json.item_id, bill: $('Create Draft Bill (WF-04b)').isExecuted ? $('Create Draft Bill (WF-04b)').item.json : null }), $execution.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "c2113c0c-3164-40b7-ae5d-af0ea5cce498"
+    },
+    {
+      "name": "Build Result Page",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        300
+      ],
+      "parameters": {
+        "jsCode": "const page = (title, body, color = '#1f6feb') => '<!doctype html><html lang=\"de\"><head><meta charset=\"utf-8\">' +\n  '<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>' + title + '</title>' +\n  '<style>body{font-family:system-ui,sans-serif;max-width:560px;margin:48px auto;padding:0 16px;color:#222}' +\n  'h1{font-size:22px;color:' + color + '}button{font-size:16px;padding:10px 18px;border:0;border-radius:6px;' +\n  'background:' + color + ';color:#fff;cursor:pointer}.muted{color:#666;font-size:14px}</style></head><body>' +\n  '<h1>' + title + '</h1>' + body + '<p class=\"muted\">Muster GmbH · n8n review queue</p></body></html>';\nconst esc = (s) => String(s ?? '').replace(/[&<>\"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;' }[c]));\n\nconst c = $('Claim Review Item').item.json;\nlet body = '<p>Review #' + c.id + ' (' + esc(c.item_type) + ') ist jetzt <b>' + esc(c.status) + '</b> / is now <b>' + esc(c.status) + '</b>.</p>';\nif ($('Create Draft Bill (WF-04b)').isExecuted) {\n  const b = $('Create Draft Bill (WF-04b)').item.json;\n  body += b.status === 'mismatch'\n    ? '<p>⚠️ Odoo-Entwurf ' + esc(b.billId) + ' angelegt, aber die Summe weicht ab / draft created, but the total differs:<br>' + esc(b.reason) + '</p>'\n    : '<p>Entwurfsrechnung in Odoo angelegt (ID ' + esc(b.billId) + ') – bitte prüfen und buchen.<br>Draft vendor bill created in Odoo (ID ' + esc(b.billId) + ') – please check and post it.</p>';\n}\nreturn { json: { html: page('Erledigt / Done', body, '#1a7f37') } };"
+      },
+      "id": "2d2f18f4-b8e7-4ab0-a318-5072d4ebed1f"
+    },
+    {
+      "name": "Respond Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        2860,
+        300
+      ],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "id": "a5480878-dc8b-41bb-a35e-ff5c6311498d"
+    },
+    {
+      "name": "Build Already Used Page",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        500
+      ],
+      "parameters": {
+        "jsCode": "const page = (title, body, color = '#1f6feb') => '<!doctype html><html lang=\"de\"><head><meta charset=\"utf-8\">' +\n  '<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>' + title + '</title>' +\n  '<style>body{font-family:system-ui,sans-serif;max-width:560px;margin:48px auto;padding:0 16px;color:#222}' +\n  'h1{font-size:22px;color:' + color + '}button{font-size:16px;padding:10px 18px;border:0;border-radius:6px;' +\n  'background:' + color + ';color:#fff;cursor:pointer}.muted{color:#666;font-size:14px}</style></head><body>' +\n  '<h1>' + title + '</h1>' + body + '<p class=\"muted\">Muster GmbH · n8n review queue</p></body></html>';\nconst esc = (s) => String(s ?? '').replace(/[&<>\"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;' }[c]));\n\nreturn { json: { html: page('Bereits entschieden / Already decided',\n  '<p>Dieser Eintrag wurde bereits bearbeitet.<br>This item has already been decided.</p>', '#b42318') } };"
+      },
+      "id": "a5e81e6f-552d-4eb5-a610-7fb2329d1371"
+    },
+    {
+      "name": "Respond Already Used",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1980,
+        560
+      ],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseCode": 409,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "id": "5d2720c0-f398-4a43-a5db-4e1b482c48ce"
+    }
+  ],
+  "connections": {
+    "Open Link (GET)": {
+      "main": [
+        [
+          {
+            "node": "Read Link Parameters",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Submit Decision (POST)": {
+      "main": [
+        [
+          {
+            "node": "Read Link Parameters",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Link Parameters": {
+      "main": [
+        [
+          {
+            "node": "Load Review Item",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Review Item": {
+      "main": [
+        [
+          {
+            "node": "Check Link",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Link": {
+      "main": [
+        [
+          {
+            "node": "Link Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Link Valid?": {
+      "main": [
+        [
+          {
+            "node": "Submitted?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Invalid Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Invalid Page": {
+      "main": [
+        [
+          {
+            "node": "Respond Invalid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Submitted?": {
+      "main": [
+        [
+          {
+            "node": "Claim Review Item",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Confirmation Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Confirmation Page": {
+      "main": [
+        [
+          {
+            "node": "Respond Confirmation Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Review Item": {
+      "main": [
+        [
+          {
+            "node": "Claimed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claimed?": {
+      "main": [
+        [
+          {
+            "node": "Approve Document?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Already Used Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Already Used Page": {
+      "main": [
+        [
+          {
+            "node": "Respond Already Used",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approve Document?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Draft Booking",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Apply Decision to Item",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Draft Booking": {
+      "main": [
+        [
+          {
+            "node": "Create Draft Bill (WF-04b)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Draft Bill (WF-04b)": {
+      "main": [
+        [
+          {
+            "node": "Log Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Decision to Item": {
+      "main": [
+        [
+          {
+            "node": "Log Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Decision": {
+      "main": [
+        [
+          {
+            "node": "Build Result Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Result Page": {
+      "main": [
+        [
+          {
+            "node": "Respond Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Berlin",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "o2cWf07ErrorsHdl"
+  },
+  "pinData": {},
+  "tags": []
+}
