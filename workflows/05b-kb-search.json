@@ -1,0 +1,162 @@
+{
+  "id": "o2cWf05bKbSearch",
+  "name": "WF-05b KB Search",
+  "active": true,
+  "nodes": [
+    {
+      "id": "03d665c0-5972-4d58-ac1e-8cb8ba5d75b1",
+      "name": "Note: WF-05b · Knowledge base search (agent tool)",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -260
+      ],
+      "parameters": {
+        "content": "## WF-05b · Knowledge base search (agent tool)\nCalled by the support agent with `{ query, language }`.\nEmbeds the question with the same model as the ingestion, takes the 8 closest chunks\n(cosine distance, pgvector `<=>`) and returns the best 4, **preferring the customer's language**:\nthe KB exists in DE and EN, and the model otherwise tends to answer in the language of the passages.\nWith a small KB (< 10k chunks) exact search is fast enough; no ANN index needed.",
+        "width": 1100,
+        "height": 300,
+        "color": 5
+      }
+    },
+    {
+      "name": "When Called by Agent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "query",
+              "type": "string"
+            },
+            {
+              "name": "language",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "id": "cc0329c2-6a42-4360-a202-89ddb459f70e"
+    },
+    {
+      "name": "Embed Question",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.LLM_BASE_URL }}/embeddings",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openRouterApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.LLM_EMBEDDING_MODEL, input: $json.query }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "credentials": {
+        "openRouterApi": {
+          "id": null,
+          "name": "OpenRouter – Muster"
+        }
+      },
+      "id": "cc9b0967-a202-4a92-aa80-c78a635f9720"
+    },
+    {
+      "name": "Find Similar Chunks",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        440,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "alwaysOutputData": true,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- 8 nearest chunks, then the customer's language first\nSELECT text, title, language, round((1 - distance)::numeric, 3) AS similarity\nFROM (\n  SELECT text, metadata->>'title' AS title, metadata->>'language' AS language,\n         embedding <=> $1::vector AS distance\n  FROM kb_chunks\n  ORDER BY distance\n  LIMIT 8\n) nearest\nORDER BY (language = $2) DESC, distance\nLIMIT 4;",
+        "options": {
+          "queryReplacement": "={{ [ '[' + $json.data[0].embedding.join(',') + ']', $('When Called by Agent').item.json.language || 'en' ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "fc55acfa-d166-42d9-a949-760e9b537b10"
+    },
+    {
+      "name": "Format Search Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        200
+      ],
+      "parameters": {
+        "jsCode": "const hits = $input.all().map((i) => i.json).filter((h) => h.text);\nif (!hits.length) return [{ json: { response: 'No matching information in the knowledge base.' } }];\nconst response = hits\n  .map((h, n) => '[' + (n + 1) + '] (' + h.language + ', similarity ' + h.similarity + ')\\n' + h.text)\n  .join('\\n\\n---\\n\\n');\nreturn [{ json: { response } }];"
+      },
+      "id": "56e3f81d-9e68-417b-a82f-af6694eff7ca"
+    }
+  ],
+  "connections": {
+    "When Called by Agent": {
+      "main": [
+        [
+          {
+            "node": "Embed Question",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embed Question": {
+      "main": [
+        [
+          {
+            "node": "Find Similar Chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Similar Chunks": {
+      "main": [
+        [
+          {
+            "node": "Format Search Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Berlin",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "o2cWf07ErrorsHdl"
+  },
+  "pinData": {},
+  "tags": []
+}

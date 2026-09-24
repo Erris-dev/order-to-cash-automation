@@ -1,0 +1,247 @@
+{
+  "id": "o2cWf05dEscalate",
+  "name": "WF-05d Escalate to Human",
+  "active": true,
+  "nodes": [
+    {
+      "id": "f423598a-a29d-4b3a-addf-ec0b6e6a666e",
+      "name": "Note: WF-05d · Escalate to a human (agent tool)",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -260
+      ],
+      "parameters": {
+        "content": "## WF-05d · Escalate to a human (agent tool)\nCalled by the support agent when it can't or shouldn't answer (complaints, invoices,\n\"talk to a person\", unknown questions). Creates a `review_queue` ticket (`support_request`)\nwith the agent's summary and the chat session id, emails customer service via **WF-10**\n(with *resolved / dismiss* links handled by **WF-09**), and returns the ticket number\nfor the agent to give to the customer.",
+        "width": 1320,
+        "height": 300,
+        "color": 5
+      }
+    },
+    {
+      "name": "When Called by Agent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "summary",
+              "type": "string"
+            },
+            {
+              "name": "customer_email",
+              "type": "string"
+            },
+            {
+              "name": "language",
+              "type": "string"
+            },
+            {
+              "name": "session_id",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "id": "604996d7-f2b1-456c-a6b7-cf35fc77e133"
+    },
+    {
+      "name": "Create Review Token",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const crypto = require('crypto');\nconst token = crypto.randomBytes(24).toString('base64url'); // only ever in the email link\nreturn { json: { ...$json, token, tokenHash: crypto.createHash('sha256').update(token).digest('hex') } };"
+      },
+      "id": "1a2fd01c-2a65-49dd-a42e-bed5cf325c0a"
+    },
+    {
+      "name": "Create Support Ticket",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        440,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO review_queue (item_type, reason, payload, approval_token_hash)\nVALUES ('support_request', $1, $2::jsonb, $3)\nRETURNING id AS ticket_id;",
+        "options": {
+          "queryReplacement": "={{ [ String($json.summary || 'Chat escalation').slice(0, 500), JSON.stringify({ customer_email: $json.customer_email || null, language: $json.language || null, session_id: $json.session_id || null }), $json.tokenHash ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "3cd1978c-6f9d-41d7-a87b-e1f4a4a9d63f"
+    },
+    {
+      "name": "Format Ticket Mail",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const t = $('When Called by Agent').item.json;\nconst token = $('Create Review Token').item.json.token;\nconst link = (d) => $env.WEBHOOK_URL + 'webhook/review-decision?id=' + $json.ticket_id + '&token=' + token + '&decision=' + d;\nconst esc = (s) => String(s ?? '-').replace(/[&<>\"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;' }[c]));\nreturn { json: {\n  subject: 'Support-Anfrage / Support request #' + $json.ticket_id + ' (chat)',\n  html: [\n    '<h3>Support-Anfrage aus dem Chat / Support request from chat</h3>',\n    '<table cellpadding=\"4\">',\n    '<tr><td><b>Ticket</b></td><td>#' + $json.ticket_id + '</td></tr>',\n    '<tr><td><b>Customer email</b></td><td>' + esc(t.customer_email) + '</td></tr>',\n    '<tr><td><b>Language</b></td><td>' + esc(t.language) + '</td></tr>',\n    '<tr><td><b>Chat session</b></td><td>' + esc(t.session_id) + '</td></tr>',\n    '</table>',\n    '<p><b>Summary:</b><br>' + esc(t.summary).replace(/\\n/g, '<br>') + '</p>',\n    '<p><a href=\"' + link('approve') + '\">✅ Erledigt / Mark resolved</a> &nbsp; <a href=\"' + link('reject') + '\">✖ Verwerfen / Dismiss</a></p>',\n  ].join('\\n'),\n} };"
+      },
+      "id": "87ae91bd-be5f-4610-a97d-c561055fabde"
+    },
+    {
+      "name": "Notify Support Team (WF-10)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        880,
+        200
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "o2cWf10SendNotif",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "aa17347d-66cf-422c-a97f-d0ef3fc38f29"
+    },
+    {
+      "name": "Log Escalation",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1100,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO event_log (workflow_name, event_type, entity_type, entity_id, message, data, execution_id)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)\nRETURNING id AS event_id;",
+        "options": {
+          "queryReplacement": "={{ [ 'WF-05d Escalate to Human', 'chat.escalated', 'review_queue', String($('Create Support Ticket').item.json.ticket_id), 'Chat escalated to a human, ticket #' + $('Create Support Ticket').item.json.ticket_id, JSON.stringify({}), $execution.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "7a062a56-77ac-4a63-ae3b-c4453b7c22c5"
+    },
+    {
+      "name": "Return to Agent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        200
+      ],
+      "parameters": {
+        "jsCode": "const id = $('Create Support Ticket').first().json.ticket_id;\nreturn [{ json: { response: 'Ticket #' + id + ' created. Customer service will reply by email within 1 working day (Mon-Fri 7:00-17:00).' } }];"
+      },
+      "id": "bb2c09c7-176a-41a8-a789-aa7cdf39caaf"
+    }
+  ],
+  "connections": {
+    "When Called by Agent": {
+      "main": [
+        [
+          {
+            "node": "Create Review Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Review Token": {
+      "main": [
+        [
+          {
+            "node": "Create Support Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Support Ticket": {
+      "main": [
+        [
+          {
+            "node": "Format Ticket Mail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Ticket Mail": {
+      "main": [
+        [
+          {
+            "node": "Notify Support Team (WF-10)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Support Team (WF-10)": {
+      "main": [
+        [
+          {
+            "node": "Log Escalation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Escalation": {
+      "main": [
+        [
+          {
+            "node": "Return to Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Berlin",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "o2cWf07ErrorsHdl"
+  },
+  "pinData": {},
+  "tags": []
+}

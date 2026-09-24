@@ -1,0 +1,260 @@
+{
+  "id": "o2cWf05aKbIngest",
+  "name": "WF-05a KB Ingestion",
+  "active": false,
+  "nodes": [
+    {
+      "id": "b89742f5-e01f-4334-af59-d9e8d0e56095",
+      "name": "Note: WF-05a · Load the knowledge base (run manually)",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -300
+      ],
+      "parameters": {
+        "content": "## WF-05a · Load the knowledge base (run manually)\nRun **Execute workflow** after editing `knowledge-base/*.md` (mounted read-only at `/knowledge-base`).\n\n1. Reads every Markdown file (front matter: `title`, `language`).\n2. **Split Into Chunks**: one chunk per `##` section, prefixed with the document title so each\n   chunk makes sense on its own.\n3. **Embed Chunks**: one OpenRouter embeddings call per file (`LLM_EMBEDDING_MODEL`).\n4. **Replace Chunks of File**: deletes the file's old chunks and inserts the new ones in one\n   statement, so re-running is safe and never leaves duplicates.",
+        "width": 1200,
+        "height": 360,
+        "color": 5
+      }
+    },
+    {
+      "name": "Run Ingestion",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {},
+      "id": "32514e10-e72e-4aea-a9e8-f33f793106d8"
+    },
+    {
+      "name": "Read Knowledge Base Files",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        220,
+        200
+      ],
+      "parameters": {
+        "operation": "read",
+        "fileSelector": "/knowledge-base/*.md",
+        "options": {}
+      },
+      "id": "9f75ab08-feac-4a23-a1c6-91c4fcc6f625"
+    },
+    {
+      "name": "Split Into Chunks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        200
+      ],
+      "parameters": {
+        "jsCode": "const MAX_CHARS = 1200;\nconst out = [];\nconst items = $input.all();\nfor (let i = 0; i < items.length; i++) {\n  const source = items[i].binary.data.fileName;\n  const raw = (await this.helpers.getBinaryDataBuffer(i, 'data')).toString('utf8').replace(/\\r\\n/g, '\\n');\n\n  // front matter: --- key: value ---\n  const fm = {};\n  let body = raw;\n  const m = raw.match(/^---\\n([\\s\\S]*?)\\n---\\n/);\n  if (m) {\n    for (const line of m[1].split('\\n')) {\n      const [k, ...v] = line.split(':');\n      if (k && v.length) fm[k.trim()] = v.join(':').trim();\n    }\n    body = raw.slice(m[0].length);\n  }\n  const title = fm.title ?? source;\n  const language = fm.language ?? (/\\.de\\.md$/.test(source) ? 'de' : 'en');\n\n  // one chunk per \"## \" section; the text before the first section is the intro\n  const sections = body.split(/\\n(?=## )/).map((s) => s.trim()).filter(Boolean);\n  const chunks = [];\n  for (const sec of sections) {\n    const heading = sec.startsWith('## ') ? sec.split('\\n')[0].slice(3).trim() : null;\n    const text = sec.replace(/^#+ .*\\n?/, '').trim() || sec;\n    for (let start = 0; start < text.length; start += MAX_CHARS) {\n      const part = text.slice(start, start + MAX_CHARS);\n      chunks.push({\n        text: title + (heading ? ' > ' + heading : '') + '\\n' + part,\n        metadata: { source, title, section: heading, language, chunk: chunks.length },\n      });\n    }\n  }\n  out.push({ json: { source, language, chunks }, pairedItem: { item: i } });\n}\nreturn out;"
+      },
+      "id": "9f9ab209-509a-4361-a807-a621eff181c1"
+    },
+    {
+      "name": "Embed Chunks",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.LLM_BASE_URL }}/embeddings",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openRouterApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.LLM_EMBEDDING_MODEL, input: $json.chunks.map((c) => c.text) }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "credentials": {
+        "openRouterApi": {
+          "id": null,
+          "name": "OpenRouter – Muster"
+        }
+      },
+      "id": "8e957d50-3b13-4af1-a213-a3bc8e86c66d"
+    },
+    {
+      "name": "Attach Vectors",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const file = $('Split Into Chunks').item.json;\nconst vectors = $json.data;\nif (!Array.isArray(vectors) || vectors.length !== file.chunks.length) {\n  throw new Error('Embedding count mismatch for ' + file.source + ': got ' + (vectors?.length ?? 0) + ', expected ' + file.chunks.length);\n}\nconst rows = file.chunks.map((c, i) => ({\n  text: c.text,\n  metadata: c.metadata,\n  embedding: '[' + vectors[i].embedding.join(',') + ']', // pgvector text format\n}));\nreturn { json: { source: file.source, rows, dimensions: vectors[0].embedding.length } };"
+      },
+      "id": "74c6e8c2-75dd-4dd3-a66d-d211c2aad087"
+    },
+    {
+      "name": "Replace Chunks of File",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1100,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH removed AS (\n  DELETE FROM kb_chunks WHERE metadata->>'source' = $1\n)\nINSERT INTO kb_chunks (text, metadata, embedding)\nSELECT r.text, r.metadata, r.embedding::vector\nFROM jsonb_to_recordset($2::jsonb) AS r(text text, metadata jsonb, embedding text)\nRETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.source, JSON.stringify($json.rows) ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "6efc19a8-93cf-4ad4-a944-40f93b8434ff"
+    },
+    {
+      "name": "Summarize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        200
+      ],
+      "parameters": {
+        "jsCode": "const files = $('Attach Vectors').all().map((i) => i.json);\nreturn [{ json: {\n  files: files.length,\n  chunks: $input.all().length,\n  dimensions: files[0]?.dimensions,\n  sources: files.map((f) => f.source + ' (' + f.rows.length + ')'),\n} }];"
+      },
+      "id": "382d291f-e1f4-4ff7-a811-4db120cb25a5"
+    },
+    {
+      "name": "Log Ingestion",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1540,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO event_log (workflow_name, event_type, entity_type, entity_id, message, data, execution_id)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)\nRETURNING id AS event_id;",
+        "options": {
+          "queryReplacement": "={{ [ 'WF-05a KB Ingestion', 'kb.ingested', null, null, 'Knowledge base loaded: ' + $json.files + ' files, ' + $json.chunks + ' chunks', JSON.stringify($json), $execution.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "a7360688-c74b-48ad-a3e9-a48b77fda753"
+    }
+  ],
+  "connections": {
+    "Run Ingestion": {
+      "main": [
+        [
+          {
+            "node": "Read Knowledge Base Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Knowledge Base Files": {
+      "main": [
+        [
+          {
+            "node": "Split Into Chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Into Chunks": {
+      "main": [
+        [
+          {
+            "node": "Embed Chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embed Chunks": {
+      "main": [
+        [
+          {
+            "node": "Attach Vectors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Vectors": {
+      "main": [
+        [
+          {
+            "node": "Replace Chunks of File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Replace Chunks of File": {
+      "main": [
+        [
+          {
+            "node": "Summarize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarize": {
+      "main": [
+        [
+          {
+            "node": "Log Ingestion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Berlin",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "o2cWf07ErrorsHdl"
+  },
+  "pinData": {},
+  "tags": []
+}

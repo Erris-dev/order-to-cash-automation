@@ -1,0 +1,200 @@
+{
+  "id": "o2cWf05cOrderSts",
+  "name": "WF-05c Order Status Lookup",
+  "active": true,
+  "nodes": [
+    {
+      "id": "7bc110b7-90a8-44df-a5a2-e61a1a73eeb6",
+      "name": "Note: WF-05c · Order status lookup (agent tool)",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -260
+      ],
+      "parameters": {
+        "content": "## WF-05c · Order status lookup (agent tool)\nCalled by the support agent with `{ order_number, email }`.\n**Both are required** and must belong together: the order is only returned if the email\nmatches the customer (or one of its contacts) in Odoo. A wrong combination gets the same\n\"not found\" answer as a non-existent order, so the chat can't be used to probe order numbers.\nEvery lookup is written to `event_log`.",
+        "width": 1100,
+        "height": 300,
+        "color": 5
+      }
+    },
+    {
+      "name": "When Called by Agent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "order_number",
+              "type": "string"
+            },
+            {
+              "name": "email",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "id": "8cdf6cde-6c47-4e6d-ae6a-5a13ecc1b8c8"
+    },
+    {
+      "name": "Find Order in Odoo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ODOO_URL }}/json/2/sale.order/search_read",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "odooApiKeyApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "={{ $env.ODOO_DB }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  domain: [\n    ['name', '=', String($json.order_number || '').trim().toUpperCase()],\n    '|', ['partner_id.email', '=ilike', String($json.email || '').trim()],\n         ['partner_id.child_ids.email', '=ilike', String($json.email || '').trim()],\n  ],\n  fields: ['name', 'state', 'date_order', 'amount_total', 'currency_id', 'invoice_status', 'client_order_ref', 'commitment_date'],\n  limit: 1,\n}) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "odooApiKeyApi": {
+          "id": null,
+          "name": "Odoo – Muster"
+        }
+      },
+      "id": "b65efef4-d208-46d1-ace6-4ff403547f38"
+    },
+    {
+      "name": "Format Order Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const input = $('When Called by Agent').item.json;\nconst order = $json.body?.[0];\nif (!input.order_number || !input.email) {\n  return { json: { found: false, response: 'Both the order number and the customer email address are required.' } };\n}\nif (!order) {\n  return { json: { found: false, response: 'No order found for this combination of order number and email address.' } };\n}\nconst STATE = {\n  draft: 'quotation (not confirmed yet)', sent: 'quotation sent (not confirmed yet)',\n  sale: 'confirmed - being prepared for delivery', done: 'locked / completed', cancel: 'cancelled',\n};\nconst INVOICE = { invoiced: 'invoiced', 'to invoice': 'not invoiced yet', no: 'nothing to invoice', upselling: 'invoiced' };\nconst lines = [\n  'Order ' + order.name + ': status ' + (STATE[order.state] ?? order.state),\n  'Order date: ' + String(order.date_order).slice(0, 10),\n  'Total: ' + Number(order.amount_total).toFixed(2) + ' ' + (order.currency_id?.[1] ?? 'EUR') + ' (incl. VAT)',\n  'Invoice: ' + (INVOICE[order.invoice_status] ?? order.invoice_status),\n];\nif (order.commitment_date) lines.push('Promised delivery date: ' + String(order.commitment_date).slice(0, 10));\nif (order.client_order_ref) lines.push('Customer reference: ' + order.client_order_ref);\nreturn { json: { found: true, response: lines.join('\\n') } };"
+      },
+      "id": "05d2df45-6c49-4973-a58a-94981afd34fe"
+    },
+    {
+      "name": "Log Order Lookup",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        660,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO event_log (workflow_name, event_type, entity_type, entity_id, message, data, execution_id)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)\nRETURNING id AS event_id;",
+        "options": {
+          "queryReplacement": "={{ [ 'WF-05c Order Status Lookup', $json.found ? 'chat.order_lookup' : 'chat.order_lookup_failed', 'order', String($('When Called by Agent').item.json.order_number || ''), ($json.found ? 'Chat order lookup: ' : 'Chat order lookup without match: ') + $('When Called by Agent').item.json.order_number, JSON.stringify({}), $execution.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "493a823c-eaf0-4ab6-a62c-c0cc3e0d7f55"
+    },
+    {
+      "name": "Return to Agent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        200
+      ],
+      "parameters": {
+        "jsCode": "return [{ json: { response: $('Format Order Status').first().json.response } }];"
+      },
+      "id": "30dc7e6e-e040-43cf-a385-b0013ef6e886"
+    }
+  ],
+  "connections": {
+    "When Called by Agent": {
+      "main": [
+        [
+          {
+            "node": "Find Order in Odoo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Order in Odoo": {
+      "main": [
+        [
+          {
+            "node": "Format Order Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Order Status": {
+      "main": [
+        [
+          {
+            "node": "Log Order Lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Order Lookup": {
+      "main": [
+        [
+          {
+            "node": "Return to Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Berlin",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "o2cWf07ErrorsHdl"
+  },
+  "pinData": {},
+  "tags": []
+}
