@@ -1,0 +1,1137 @@
+{
+  "id": "o2cWf04bBookBill",
+  "name": "WF-04b Book Vendor Bill",
+  "active": true,
+  "nodes": [
+    {
+      "id": "d3e674f7-5876-4cba-a7fc-0288115d685b",
+      "name": "Note: WF-04b · Book a vendor bill in Odoo (shared)",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -420
+      ],
+      "parameters": {
+        "content": "## WF-04b · Book a vendor bill in Odoo (shared)\nCalled with `{ documentId, post, approvedBy }` by\n- **WF-04** after a clean automatic extraction (`post: true`), and\n- **WF-09** when a person approves a document from the review queue (`post: false` → draft for the accountant).\n\nEverything comes from the `documents` row (extracted fields + original PDF), so both callers book identically.\nSteps: find vendor by **VAT ID** (else exact name) or create it → bill with German input taxes (**19 % I / 7 % I**)\n→ attach the PDF → compare **Odoo's computed total** with the invoice → post (or leave as draft).\n\nReturns `{ status: booked | draft | mismatch, billId, billName, reason }`.",
+        "width": 1500,
+        "height": 360,
+        "color": 6
+      }
+    },
+    {
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "23eecc25-a80b-44a3-a30c-46847cfd9acb"
+    },
+    {
+      "name": "Load Document",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        220,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, supplier_name, supplier_vat_id, invoice_number,\n       to_char(invoice_date, 'YYYY-MM-DD') AS invoice_date, to_char(due_date, 'YYYY-MM-DD') AS due_date,\n       total_amount::float AS total_amount, line_items, confidence::float AS confidence,\n       file_name, file_base64, extraction_raw->>'supplier_address' AS supplier_address\nFROM documents WHERE id = $1;",
+        "options": {
+          "queryReplacement": "={{ [ $json.documentId ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "7620a075-6e17-4126-a40d-cc14ddd1445d"
+    },
+    {
+      "name": "Find Vendor",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ODOO_URL }}/json/2/res.partner/search_read",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "odooApiKeyApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "={{ $env.ODOO_DB }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  domain: $json.supplier_vat_id\n    ? [['vat', '=', $json.supplier_vat_id.replace(/\\s/g, '')]]\n    : [['name', '=ilike', $json.supplier_name]],\n  fields: ['id', 'name'], limit: 1,\n}) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "odooApiKeyApi": {
+          "id": null,
+          "name": "Odoo – Muster"
+        }
+      },
+      "id": "b377bbc4-85d8-4765-a0c6-df970cbbf702"
+    },
+    {
+      "name": "Vendor Exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "69e2dad6-3978-40a3-a2b1-d476083dfdcc",
+              "leftValue": "={{ $json.body.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "05bb4e29-06be-406d-ad01-0d051ea183a2"
+    },
+    {
+      "name": "Use Existing Vendor",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        880,
+        80
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "42a484c4-c9a8-4e1b-a2b6-ab77a65495dc",
+              "name": "vendorId",
+              "value": "={{ $json.body[0].id }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "4718da71-39c2-474e-a125-e4700f005f52"
+    },
+    {
+      "name": "Create Vendor",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        320
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ODOO_URL }}/json/2/res.partner/create",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "odooApiKeyApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "={{ $env.ODOO_DB }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ vals_list: [{\n  name: $('Load Document').item.json.supplier_name,\n  vat: ($('Load Document').item.json.supplier_vat_id || '').replace(/\\s/g, '') || false,\n  street: $('Load Document').item.json.supplier_address || false,\n  is_company: true,\n  supplier_rank: 1,\n  comment: 'Created by n8n WF-04b from document ' + $('Load Document').item.json.id,\n}] }) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "odooApiKeyApi": {
+          "id": null,
+          "name": "Odoo – Muster"
+        }
+      },
+      "id": "0b1f3813-c37e-4943-a5ea-a7a49ba89558"
+    },
+    {
+      "name": "Use New Vendor",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1100,
+        320
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ca8bd335-93b6-4741-a1ad-2bb8f6365ada",
+              "name": "vendorId",
+              "value": "={{ $json.body[0] }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "9b18c15d-50d8-4b53-a020-0ddb4928758c"
+    },
+    {
+      "name": "Find Purchase Taxes",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ODOO_URL }}/json/2/account.tax/search_read",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "odooApiKeyApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "={{ $env.ODOO_DB }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ domain: [['type_tax_use', '=', 'purchase'], ['name', 'in', ['19% I', '7% I']]], fields: ['id', 'name', 'amount'] }) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "odooApiKeyApi": {
+          "id": null,
+          "name": "Odoo – Muster"
+        }
+      },
+      "id": "bfe0237d-187c-4216-a246-8a72f7b0f4ea"
+    },
+    {
+      "name": "Build Vendor Bill",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const doc = $('Load Document').item.json;\nconst call = $('When Called').item.json;\nconst vendorId = $('Use Existing Vendor').isExecuted\n  ? $('Use Existing Vendor').item.json.vendorId\n  : $('Use New Vendor').item.json.vendorId;\nconst taxByRate = Object.fromEntries($json.body.map((t) => [Number(t.amount), t.id]));\n\nconst lines = (doc.line_items ?? []).map((l) => {\n  const rate = Number(l.vat_rate_percent ?? 0);\n  if (rate && !taxByRate[rate]) throw new Error('No Odoo purchase tax for ' + rate + ' % (expected \"' + rate + '% I\")');\n  return [0, 0, {\n    name: l.description,\n    quantity: l.quantity,\n    price_unit: l.unit_price,\n    tax_ids: rate ? [[6, 0, [taxByRate[rate]]]] : [[5, 0, 0]],\n  }];\n});\nif (!lines.length) throw new Error('Document ' + doc.id + ' has no line items - cannot build a bill');\n\nconst how = call.approvedBy ? 'approved by ' + call.approvedBy + ' (WF-09)' : 'booked automatically (WF-04, confidence ' + doc.confidence + ')';\nreturn { json: { vals: {\n  move_type: 'in_invoice',\n  partner_id: Number(vendorId),\n  ref: doc.invoice_number,\n  invoice_date: doc.invoice_date,\n  ...(doc.due_date ? { invoice_date_due: doc.due_date } : {}),\n  narration: 'n8n document ' + doc.id + ': ' + how,\n  invoice_line_ids: lines,\n} } };"
+      },
+      "id": "c5b98558-45d6-4376-a67b-45db1941de08"
+    },
+    {
+      "name": "Create Vendor Bill",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1760,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ODOO_URL }}/json/2/account.move/create",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "odooApiKeyApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "={{ $env.ODOO_DB }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ vals_list: [$json.vals] }) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "odooApiKeyApi": {
+          "id": null,
+          "name": "Odoo – Muster"
+        }
+      },
+      "id": "ab8c30e7-bbfb-4dde-a3a4-7448de2e4de7"
+    },
+    {
+      "name": "Has PDF?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1980,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ed905bd9-5dc4-4348-aa4c-9ea322457e4f",
+              "leftValue": "={{ $('Load Document').item.json.file_base64 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "301c3cc3-d7de-4289-a253-efc17748bd05"
+    },
+    {
+      "name": "Attach PDF to Bill",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        100
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ODOO_URL }}/json/2/ir.attachment/create",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "odooApiKeyApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "={{ $env.ODOO_DB }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ vals_list: [{\n  name: $('Load Document').item.json.file_name, type: 'binary', datas: $('Load Document').item.json.file_base64, mimetype: 'application/pdf',\n  res_model: 'account.move', res_id: $('Create Vendor Bill').item.json.body[0],\n}] }) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "odooApiKeyApi": {
+          "id": null,
+          "name": "Odoo – Muster"
+        }
+      },
+      "id": "d565dacf-61b6-4f1a-ad05-839f88a94223"
+    },
+    {
+      "name": "Read Bill Totals",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2420,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ODOO_URL }}/json/2/account.move/read",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "odooApiKeyApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "={{ $env.ODOO_DB }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ ids: [$('Create Vendor Bill').item.json.body[0]], fields: ['name', 'amount_untaxed', 'amount_tax', 'amount_total', 'state'] }) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "odooApiKeyApi": {
+          "id": null,
+          "name": "Odoo – Muster"
+        }
+      },
+      "id": "4eb7b17c-e456-4712-ad90-a6e2a334a9d0"
+    },
+    {
+      "name": "Odoo Total Matches?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2640,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "94266986-3583-49b3-ac78-6e4c2e5f6df5",
+              "leftValue": "={{ Math.abs($json.body[0].amount_total - $('Load Document').item.json.total_amount) <= 0.02 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "bedf8939-cd3d-4d76-ae6d-4eff27529ba1"
+    },
+    {
+      "name": "Post Now?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2860,
+        100
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cf2007f2-c30b-422d-aad4-0b3ca7b01a34",
+              "leftValue": "={{ $('When Called').item.json.post === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "9349609d-ab21-48c6-a46c-b499b683ae9a"
+    },
+    {
+      "name": "Post Vendor Bill",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3080,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ODOO_URL }}/json/2/account.move/action_post",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "odooApiKeyApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "={{ $env.ODOO_DB }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ ids: [$('Create Vendor Bill').item.json.body[0]] }) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "odooApiKeyApi": {
+          "id": null,
+          "name": "Odoo – Muster"
+        }
+      },
+      "id": "e2fa36f7-d2ee-41f2-ac3f-9832d527e360"
+    },
+    {
+      "name": "Read Bill Number",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3300,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ODOO_URL }}/json/2/account.move/read",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "odooApiKeyApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Odoo-Database",
+              "value": "={{ $env.ODOO_DB }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ ids: [$('Create Vendor Bill').item.json.body[0]], fields: ['name', 'amount_total', 'state'] }) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "odooApiKeyApi": {
+          "id": null,
+          "name": "Odoo – Muster"
+        }
+      },
+      "id": "d0322e33-bdbd-4732-abaf-e73f33f16e35"
+    },
+    {
+      "name": "Mark Booked",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3520,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE documents SET status = 'booked', odoo_bill_id = $2 WHERE id = $1 RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $('Load Document').item.json.id, $('Create Vendor Bill').item.json.body[0] ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "681eedb0-f7a5-44e4-aee8-27ee8a76eaae"
+    },
+    {
+      "name": "Log Bill Booked",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3740,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO event_log (workflow_name, event_type, entity_type, entity_id, message, data, execution_id)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)\nRETURNING id AS event_id;",
+        "options": {
+          "queryReplacement": "={{ [ 'WF-04b Book Vendor Bill', 'document.booked', 'document', String($('Load Document').item.json.id), 'Vendor bill ' + $('Read Bill Number').item.json.body[0].name + ' booked for ' + $('Load Document').item.json.supplier_name + ' ' + $('Load Document').item.json.invoice_number, JSON.stringify({ odoo_bill_id: $('Create Vendor Bill').item.json.body[0], amount_total: $('Read Bill Number').item.json.body[0].amount_total }), $execution.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "59c344d5-0a05-414d-afba-7b70bb88ca50"
+    },
+    {
+      "name": "Result: Booked",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        3960,
+        0
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "532f644c-bff4-42fe-a1b9-c4db90cf5650",
+              "name": "status",
+              "value": "booked",
+              "type": "string"
+            },
+            {
+              "id": "3ee59d33-6c01-4ae9-a434-5797d7b92cd4",
+              "name": "billId",
+              "value": "={{ $('Create Vendor Bill').item.json.body[0] }}",
+              "type": "number"
+            },
+            {
+              "id": "1e745dd3-7515-4c03-a180-26caed0a529d",
+              "name": "billName",
+              "value": "={{ $('Read Bill Number').item.json.body[0].name }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b5cf55b4-97f9-431e-a1f3-4c33ccf5de61"
+    },
+    {
+      "name": "Mark Approved (Draft)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3080,
+        220
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE documents SET status = 'approved', odoo_bill_id = $2 WHERE id = $1 RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $('Load Document').item.json.id, $('Create Vendor Bill').item.json.body[0] ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "12600991-abeb-43a5-a80d-36acff7b014d"
+    },
+    {
+      "name": "Log Draft Created",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3300,
+        220
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO event_log (workflow_name, event_type, entity_type, entity_id, message, data, execution_id)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)\nRETURNING id AS event_id;",
+        "options": {
+          "queryReplacement": "={{ [ 'WF-04b Book Vendor Bill', 'document.approved', 'document', String($('Load Document').item.json.id), 'Draft vendor bill ' + $('Create Vendor Bill').item.json.body[0] + ' created for ' + $('Load Document').item.json.supplier_name + ' after approval by ' + $('When Called').item.json.approvedBy, JSON.stringify({}), $execution.id ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "3f02cf62-e47e-4103-a366-b6a801dcee08"
+    },
+    {
+      "name": "Result: Draft",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        3520,
+        220
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "879eaf0e-bca5-411f-a01b-8b554f0fb124",
+              "name": "status",
+              "value": "draft",
+              "type": "string"
+            },
+            {
+              "id": "bd49c385-8d5a-4a6f-ad7f-bb54fa98179e",
+              "name": "billId",
+              "value": "={{ $('Create Vendor Bill').item.json.body[0] }}",
+              "type": "number"
+            },
+            {
+              "id": "76558eab-8bb0-4399-af95-bc9229703361",
+              "name": "billName",
+              "value": "={{ $('Read Bill Totals').item.json.body[0].name }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "fa5813a2-059a-4a3b-a6f5-9397472f8924"
+    },
+    {
+      "name": "Remember Draft Bill",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2860,
+        380
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE documents SET odoo_bill_id = $2 WHERE id = $1 RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $('Load Document').item.json.id, $('Create Vendor Bill').item.json.body[0] ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "Postgres – Automation"
+        }
+      },
+      "id": "e4fd39d1-10e1-43b1-a72c-0ada0747b7fb"
+    },
+    {
+      "name": "Result: Mismatch",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        3080,
+        380
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "2212483c-1de3-4c15-ac0c-46fcfb2521c5",
+              "name": "status",
+              "value": "mismatch",
+              "type": "string"
+            },
+            {
+              "id": "d5cb1f1a-fca5-4069-a692-ff2c6bd08013",
+              "name": "billId",
+              "value": "={{ $('Create Vendor Bill').item.json.body[0] }}",
+              "type": "number"
+            },
+            {
+              "id": "6f2fc1a0-41a0-4693-ae4f-35e6e39d2496",
+              "name": "reason",
+              "value": "={{ 'Odoo computed ' + $('Read Bill Totals').item.json.body[0].amount_total + ' but the invoice says ' + $('Load Document').item.json.total_amount + ' - draft bill ' + $('Create Vendor Bill').item.json.body[0] + ' left unposted' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "df45bb43-0722-473e-a9c5-c4e54182e196"
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Load Document",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Document": {
+      "main": [
+        [
+          {
+            "node": "Find Vendor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Vendor": {
+      "main": [
+        [
+          {
+            "node": "Vendor Exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vendor Exists?": {
+      "main": [
+        [
+          {
+            "node": "Use Existing Vendor",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Vendor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Vendor": {
+      "main": [
+        [
+          {
+            "node": "Use New Vendor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Use Existing Vendor": {
+      "main": [
+        [
+          {
+            "node": "Find Purchase Taxes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Use New Vendor": {
+      "main": [
+        [
+          {
+            "node": "Find Purchase Taxes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Purchase Taxes": {
+      "main": [
+        [
+          {
+            "node": "Build Vendor Bill",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Vendor Bill": {
+      "main": [
+        [
+          {
+            "node": "Create Vendor Bill",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Vendor Bill": {
+      "main": [
+        [
+          {
+            "node": "Has PDF?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has PDF?": {
+      "main": [
+        [
+          {
+            "node": "Attach PDF to Bill",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read Bill Totals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach PDF to Bill": {
+      "main": [
+        [
+          {
+            "node": "Read Bill Totals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Bill Totals": {
+      "main": [
+        [
+          {
+            "node": "Odoo Total Matches?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Odoo Total Matches?": {
+      "main": [
+        [
+          {
+            "node": "Post Now?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Remember Draft Bill",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post Now?": {
+      "main": [
+        [
+          {
+            "node": "Post Vendor Bill",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Approved (Draft)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post Vendor Bill": {
+      "main": [
+        [
+          {
+            "node": "Read Bill Number",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Bill Number": {
+      "main": [
+        [
+          {
+            "node": "Mark Booked",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Booked": {
+      "main": [
+        [
+          {
+            "node": "Log Bill Booked",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Bill Booked": {
+      "main": [
+        [
+          {
+            "node": "Result: Booked",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Approved (Draft)": {
+      "main": [
+        [
+          {
+            "node": "Log Draft Created",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Draft Created": {
+      "main": [
+        [
+          {
+            "node": "Result: Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Remember Draft Bill": {
+      "main": [
+        [
+          {
+            "node": "Result: Mismatch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Berlin",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "o2cWf07ErrorsHdl"
+  },
+  "pinData": {},
+  "tags": []
+}
